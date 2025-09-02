@@ -9,17 +9,15 @@ import {
   Radio,
   RadioGroup,
 } from "@nextui-org/react";
-import { ArrowUpRightIcon } from "@heroicons/react/24/outline";
-import {
-  BLACKBUTTONCLASSNAMES,
-  WHITEBUTTONCLASSNAMES,
-} from "@/utils/STATIC-VARIABLES";
+import { ArrowUpRightIcon, Bars3Icon } from "@heroicons/react/24/outline";
+import { BLACKBUTTONCLASSNAMES } from "@/utils/STATIC-VARIABLES";
 import { SignerContext } from "@/components/utility-components/nostr-context-provider";
 
 export default function StandaloneLanding() {
   const router = useRouter();
   const [contactType, setContactType] = useState<"email" | "nostr">("email");
   const [contact, setContact] = useState("");
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const signerContext = useContext(SignerContext);
   useEffect(() => {
@@ -203,36 +201,89 @@ export default function StandaloneLanding() {
       </div>
 
       {/* Navigation */}
-      <nav className="relative z-20 flex items-start justify-between p-4 md:items-center md:p-6 md:px-12">
-        <div className="flex flex-col items-end space-y-1 md:flex-row md:items-center md:space-x-2 md:space-y-0">
-          <div className="flex items-center space-x-2">
-            <Image
-              src="/milk-market.png"
-              alt="Milk Market"
-              className="h-8 w-8"
-            />
-            <span className="text-xl font-bold">Milk</span>
-          </div>
-          <span className="text-xl font-bold md:hidden">Market</span>
-          <span className="hidden text-xl font-bold md:inline">Market</span>
+      <nav className="relative z-20 flex items-center justify-between p-4 md:p-6 md:px-12">
+        <div className="flex items-center space-x-2">
+          <Image src="/milk-market.png" alt="Milk Market" className="h-8 w-8" />
+          <span className="text-xl font-bold">Milk Market</span>
         </div>
-        <div className="flex flex-col items-end space-y-2 md:flex-row md:items-center md:space-x-4 md:space-y-0">
+
+        {/* Desktop Navigation */}
+        <div className="hidden md:flex md:items-center md:space-x-4">
           <Button
             onClick={() => router.push("/producers")}
             color="default"
             variant="ghost"
             className="w-auto text-light-text hover:text-gray-600"
           >
-            Producer Guide
+            Producer Guide 🚜
+          </Button>
+          <Button
+            onClick={() => {
+              const signupSection = document.getElementById("signup");
+              if (signupSection) {
+                signupSection.scrollIntoView({ behavior: "smooth" });
+              }
+            }}
+            color="default"
+            variant="solid"
+            className={`w-auto ${BLACKBUTTONCLASSNAMES}`}
+          >
+            Stay Milky 📨
           </Button>
           <Button
             onClick={() => router.push("/marketplace")}
             color="default"
             variant="solid"
-            className={`w-auto ${BLACKBUTTONCLASSNAMES}`}
+            className="w-auto bg-gradient-to-tr from-yellow-700 via-yellow-500 to-yellow-700 text-light-text shadow-lg"
           >
-            Join Now
+            FREE MILK 🥛
           </Button>
+        </div>
+
+        {/* Mobile Navigation */}
+        <div className="relative md:hidden">
+          <Button
+            onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+            className="bg-transparent"
+          >
+            <Bars3Icon className="h-6 w-6 text-yellow-600" />
+          </Button>
+          {isMobileMenuOpen && (
+            <div className="absolute right-0 top-full mt-2 w-48 rounded-md border border-gray-200 bg-white shadow-lg">
+              <div className="py-1">
+                <Button
+                  className="w-full bg-transparent px-4 py-2 text-left text-sm font-bold text-light-text hover:bg-gray-50"
+                  onClick={() => {
+                    router.push("/producers");
+                    setIsMobileMenuOpen(false);
+                  }}
+                >
+                  Producer Guide 🚜
+                </Button>
+                <Button
+                  className="w-full bg-transparent px-4 py-2 text-left text-sm font-bold text-light-text hover:bg-gray-50"
+                  onClick={() => {
+                    const signupSection = document.getElementById("signup");
+                    if (signupSection) {
+                      signupSection.scrollIntoView({ behavior: "smooth" });
+                    }
+                    setIsMobileMenuOpen(false);
+                  }}
+                >
+                  Stay Milky 📨
+                </Button>
+                <Button
+                  className="w-full bg-transparent px-4 py-2 text-left text-sm font-bold text-yellow-600 hover:bg-gray-50"
+                  onClick={() => {
+                    router.push("/marketplace");
+                    setIsMobileMenuOpen(false);
+                  }}
+                >
+                  FREE MILK 🥛
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       </nav>
 
@@ -285,15 +336,40 @@ export default function StandaloneLanding() {
               </div>
             </div>
 
-            <Button
-              onClick={() => router.push("/marketplace")}
-              color="default"
-              variant="solid"
-              size="lg"
-              className="transform rounded-xl bg-dark-bg px-6 py-3 text-xl text-dark-text shadow-xl transition-all hover:scale-105 hover:bg-gray-800"
-            >
-              Join the &ldquo;FREE MILK&rdquo; Movement →
-            </Button>
+            <div className="flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
+              <Button
+                onClick={() => router.push("/marketplace")}
+                color="default"
+                variant="solid"
+                size="lg"
+                className="transform rounded-xl bg-gradient-to-tr from-yellow-700 via-yellow-500 to-yellow-700 px-6 py-3 text-xl text-light-text shadow-xl transition-all hover:scale-105"
+              >
+                FREE MILK 🥛
+              </Button>
+              <Button
+                onClick={() => {
+                  const signupSection = document.getElementById("signup");
+                  if (signupSection) {
+                    signupSection.scrollIntoView({ behavior: "smooth" });
+                  }
+                }}
+                color="default"
+                variant="solid"
+                size="lg"
+                className="transform rounded-xl bg-dark-bg px-6 py-3 text-xl text-dark-text shadow-xl transition-all hover:scale-105 hover:bg-gray-800"
+              >
+                Stay Milky 📨
+              </Button>
+              <Button
+                onClick={() => router.push("/producers")}
+                color="default"
+                variant="solid"
+                size="lg"
+                className="hover:bg-white-800 transform rounded-xl border-2 border-light-text bg-light-bg px-6 py-3 text-xl text-light-text shadow-xl transition-all hover:scale-105"
+              >
+                Producer Guide 🚜
+              </Button>
+            </div>
           </div>
         </div>
       </section>
@@ -738,12 +814,12 @@ export default function StandaloneLanding() {
                     <span className="font-semibold text-gray-800">Nostr:</span>
                   </div>
                   <a
-                    href="https://njump.me/shopstr@shopstrmarkets.com"
+                    href="https://njump.me/milkmarket@milk.market"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="break-words font-mono font-medium text-light-text underline transition-colors hover:text-gray-600"
                   >
-                    shopstr@shopstrmarkets.com
+                    milkmarket@milk.market
                   </a>
                 </div>
               </div>
@@ -763,8 +839,10 @@ export default function StandaloneLanding() {
               Click below to join the Milk Market community!
             </p>
             <Button
-              className={WHITEBUTTONCLASSNAMES}
               onClick={() => router.push("/marketplace")}
+              color="default"
+              variant="solid"
+              className="w-auto bg-gradient-to-tr from-yellow-700 via-yellow-500 to-yellow-700 text-light-text shadow-lg"
             >
               FREE MILK 🥛
             </Button>
