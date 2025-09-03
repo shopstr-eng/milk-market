@@ -134,8 +134,8 @@ export default async function handler(
               const end = convertedPaths[i + 1];
 
               page.drawLine({
-                start: { x: start!.x, y: start!.y },
-                end: { x: end!.x, y: end!.y },
+                start: { x: start.x, y: start.y },
+                end: { x: end.x, y: end.y },
                 thickness: lineWidth,
                 color: color,
               });

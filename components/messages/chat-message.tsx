@@ -29,6 +29,8 @@ import {
   generateKeys,
   getLocalStorageData,
 } from "../../utils/nostr/nostr-helper-functions";
+import { viewEncryptedAgreement } from "@/utils/encryption/agreement-viewer";
+import { encryptFileWithNip44 } from "@/utils/encryption/file-encryption";
 
 function isDecodableToken(token: string): boolean {
   try {
@@ -144,11 +146,6 @@ const ChatMessage = ({
     return null;
   };
 
-  const handlePdfPreviewClick = (pdfUrl: string) => {
-    setCurrentPdfUrl(pdfUrl);
-    setShowPdfModal(true);
-  };
-
   const handleFinishSigning = async () => {
     if (!signer || !isLoggedIn || !currentPdfUrl) return;
 
@@ -182,7 +179,7 @@ const ChatMessage = ({
 
       const pdfBlob = await response.blob();
 
-      // Process PDF with annotations using server-side service
+      // First, process annotations on the original PDF
       const formData = new FormData();
       formData.append("pdf", pdfBlob, "agreement.pdf");
       formData.append("annotations", JSON.stringify(annotations));
@@ -206,17 +203,30 @@ const ChatMessage = ({
         annotatedPdfBlob.size
       );
 
+      // Now encrypt the annotated PDF using buyer's signature and seller's npub
+      const sellerNpub = nip19.npubEncode(productPubkey);
+      const encryptedFile = await encryptFileWithNip44(
+        new File([annotatedPdfBlob], "signed-agreement.pdf", {
+          type: "application/pdf",
+        }),
+        sellerNpub,
+        true,
+        signer
+      );
+
+      const encryptedPdfBlob = encryptedFile;
+
       // Create a new filename with timestamp to indicate it's been "signed"
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
       const file = new File(
-        [annotatedPdfBlob],
-        `signed-agreement-${timestamp}.pdf`,
+        [encryptedPdfBlob],
+        `encrypted-signed-agreement-${timestamp}.pdf`,
         {
           type: "application/pdf",
         }
       );
 
-      // Upload the PDF with retry logic
+      // Upload the encrypted PDF with retry logic
       const { blossomServers } = getLocalStorageData();
       const servers =
         blossomServers && blossomServers.length > 0
@@ -260,7 +270,7 @@ const ChatMessage = ({
         throw new Error("Upload succeeded but no URL returned from server");
       }
 
-      console.log("Final signed PDF URL:", signedPdfUrl);
+      console.log("Final encrypted signed PDF URL:", signedPdfUrl);
 
       // Generate random keys for message wrapping
       const { nsec: randomNsecSender, npub: randomNpubSender } =
@@ -274,7 +284,7 @@ const ChatMessage = ({
       const decodedRandomPrivkeyReceiver = nip19.decode(randomNsecReceiver);
 
       // Send DM with signed PDF URL to the product owner
-      const message = `Here is the signed herdshare agreement from ${userNpub}: ${signedPdfUrl}`;
+      const message = `Here is the encrypted signed herdshare agreement from ${userNpub}: ${signedPdfUrl}`;
       console.log("new", message);
       const giftWrappedMessageEvent = await constructGiftWrappedEvent(
         userPubkey!,
@@ -335,12 +345,60 @@ const ChatMessage = ({
       const isSignedAgreement = content
         .toLowerCase()
         .includes("signed herdshare agreement");
+      const isEncryptedAgreement =
+        content.toLowerCase().includes("encrypted herdshare agreement") ||
+        content
+          .toLowerCase()
+          .includes("encrypted signed herdshare agreement") ||
+        (content.toLowerCase().includes("encrypted") &&
+          content.toLowerCase().includes("agreement"));
 
       const handleDownloadPdf = async () => {
         try {
-          const response = await fetch(herdsharePdfUrl);
-          const blob = await response.blob();
-          const url = window.URL.createObjectURL(blob);
+          console.log(
+            "Checking if PDF URL needs decryption for download:",
+            herdsharePdfUrl
+          );
+
+          const isEncrypted = await checkIfPdfIsEncrypted(herdsharePdfUrl);
+
+          let blobToDownload: Blob;
+
+          if (isEncrypted) {
+            console.log("Content is encrypted, decrypting for download...");
+
+            if (!signer || !isLoggedIn) {
+              alert("Please log in to download encrypted agreements.");
+              return;
+            }
+
+            const sellerNpub = getSellerNpubFromTags();
+            console.log("Seller npub for decryption:", sellerNpub);
+
+            blobToDownload = await viewEncryptedAgreement(
+              herdsharePdfUrl,
+              sellerNpub,
+              signer
+            );
+
+            if (!blobToDownload || blobToDownload.size === 0) {
+              alert("Failed to decrypt agreement or received empty data.");
+              return;
+            }
+
+            console.log(
+              "Decrypted blob size for download:",
+              blobToDownload.size
+            );
+
+            await validatePdfBlob(blobToDownload);
+          } else {
+            console.log("Content is not encrypted, downloading directly");
+            const response = await fetch(herdsharePdfUrl);
+            blobToDownload = await response.blob();
+          }
+
+          const url = window.URL.createObjectURL(blobToDownload);
           const a = document.createElement("a");
           a.href = url;
           a.download = `signed-herdshare-agreement-${
@@ -352,7 +410,112 @@ const ChatMessage = ({
           window.URL.revokeObjectURL(url);
         } catch (error) {
           console.error("Failed to download PDF:", error);
-          alert("Failed to download PDF. Please try again.");
+          alert("Failed to download PDF: " + (error as Error).message);
+        }
+      };
+
+      const checkIfPdfIsEncrypted = async (url: string): Promise<boolean> => {
+        try {
+          const testResponse = await fetch(url);
+          const testBuffer = await testResponse.arrayBuffer();
+          const testArray = new Uint8Array(testBuffer);
+          const header = String.fromCharCode(...testArray.slice(0, 4));
+          return header !== "%PDF";
+        } catch (error) {
+          console.error("Error checking PDF encryption status:", error);
+          return false;
+        }
+      };
+
+      const getSellerNpubFromTags = (): string => {
+        const tagsMap = new Map(
+          messageEvent.tags
+            .map((tag) => [tag[0], tag[1]])
+            .filter(
+              (pair): pair is [string, string] =>
+                pair[0] !== undefined && pair[1] !== undefined
+            )
+        );
+
+        const productAddress = tagsMap.get("a") || tagsMap.get("item") || "";
+        const sellerPubkey = productAddress
+          ? productAddress.split(":")[1]
+          : currentChatPubkey;
+
+        if (!sellerPubkey) {
+          throw new Error("Could not determine seller's pubkey for decryption");
+        }
+
+        return nip19.npubEncode(sellerPubkey);
+      };
+
+      const validatePdfBlob = async (blob: Blob): Promise<void> => {
+        const arrayBuffer = await blob.arrayBuffer();
+        const uint8Array = new Uint8Array(arrayBuffer);
+
+        const pdfHeader = String.fromCharCode(...uint8Array.slice(0, 4));
+        if (pdfHeader !== "%PDF") {
+          throw new Error(
+            `Invalid PDF header. Expected %PDF, got: ${pdfHeader}`
+          );
+        }
+
+        const firstLine = String.fromCharCode(...uint8Array.slice(0, 8));
+        if (!firstLine.startsWith("%PDF-1.")) {
+          throw new Error(
+            `Invalid PDF version. Expected %PDF-1.x, got: ${firstLine}`
+          );
+        }
+      };
+
+      const handleViewSigningModal = async () => {
+        try {
+          console.log("Checking if PDF URL needs decryption:", herdsharePdfUrl);
+
+          const isEncrypted = await checkIfPdfIsEncrypted(herdsharePdfUrl);
+
+          if (isEncrypted) {
+            console.log("Content is encrypted, decrypting...");
+
+            if (!signer || !isLoggedIn) {
+              alert("Please log in to view encrypted agreements.");
+              return;
+            }
+
+            const sellerNpub = getSellerNpubFromTags();
+            console.log("Seller npub for decryption:", sellerNpub);
+
+            const decryptedBlob = await viewEncryptedAgreement(
+              herdsharePdfUrl,
+              sellerNpub,
+              signer
+            );
+
+            if (!decryptedBlob || decryptedBlob.size === 0) {
+              alert("Failed to decrypt agreement or received empty data.");
+              return;
+            }
+
+            console.log("Decrypted blob size:", decryptedBlob.size);
+
+            await validatePdfBlob(decryptedBlob);
+
+            const blobUrl = URL.createObjectURL(decryptedBlob);
+            console.log("Created blob URL:", blobUrl);
+
+            setCurrentPdfUrl(blobUrl);
+            setShowPdfModal(true);
+          } else {
+            console.log("Content is valid PDF, using directly");
+            setCurrentPdfUrl(herdsharePdfUrl);
+            setShowPdfModal(true);
+          }
+        } catch (error) {
+          console.error("Error in handleViewSigningModal:", error);
+          alert(
+            "An error occurred while trying to view the agreement: " +
+              (error as Error).message
+          );
         }
       };
 
@@ -363,9 +526,13 @@ const ChatMessage = ({
             <div className="mb-2 flex items-center gap-2">
               <DocumentTextIcon className="h-5 w-5 text-blue-600" />
               <span className="text-sm font-medium text-gray-700">
-                {isSignedAgreement
-                  ? "Signed Herdshare Agreement"
-                  : "Herdshare Agreement"}
+                {isEncryptedAgreement
+                  ? content.toLowerCase().includes("signed")
+                    ? "Encrypted Signed Herdshare Agreement"
+                    : "Encrypted Herdshare Agreement"
+                  : isSignedAgreement
+                    ? "Signed Herdshare Agreement"
+                    : "Herdshare Agreement"}
               </span>
             </div>
             <div
@@ -373,7 +540,7 @@ const ChatMessage = ({
               onClick={() =>
                 isSignedAgreement
                   ? handleDownloadPdf()
-                  : handlePdfPreviewClick(herdsharePdfUrl)
+                  : handleViewSigningModal()
               }
             >
               <iframe
@@ -393,16 +560,26 @@ const ChatMessage = ({
             <Button
               size="sm"
               className="mt-2 w-full"
-              color={isSignedAgreement ? "success" : "warning"}
+              color={
+                isSignedAgreement
+                  ? "success"
+                  : isEncryptedAgreement
+                    ? "primary"
+                    : "warning"
+              }
               onClick={() =>
                 isSignedAgreement
                   ? handleDownloadPdf()
-                  : handlePdfPreviewClick(herdsharePdfUrl)
+                  : handleViewSigningModal()
               }
             >
               {isSignedAgreement
                 ? "Download for Your Records"
-                : "View & Sign Agreement"}
+                : isEncryptedAgreement
+                  ? content.toLowerCase().includes("signed")
+                    ? "View Encrypted Signed Agreement"
+                    : "View Encrypted Agreement"
+                  : "Review & Sign Agreement"}
             </Button>
           </div>
         </div>
@@ -493,6 +670,10 @@ const ChatMessage = ({
           onOpenChange={(isOpen) => {
             if (!isOpen) {
               setShowPdfModal(false);
+              // Clean up blob URL if it exists
+              if (currentPdfUrl && currentPdfUrl.startsWith("blob:")) {
+                URL.revokeObjectURL(currentPdfUrl);
+              }
               setCurrentPdfUrl("");
               setAnnotations([]);
             }
@@ -533,6 +714,10 @@ const ChatMessage = ({
                   variant="light"
                   onPress={() => {
                     setShowPdfModal(false);
+                    // Clean up blob URL if it exists
+                    if (currentPdfUrl && currentPdfUrl.startsWith("blob:")) {
+                      URL.revokeObjectURL(currentPdfUrl);
+                    }
                     setCurrentPdfUrl("");
                     setAnnotations([]);
                   }}

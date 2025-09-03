@@ -91,12 +91,63 @@ export const PDFAnnotator: React.FC<PDFAnnotatorProps> = ({
 
   const loadPDFDocument = async () => {
     try {
-      const pdf = await window.pdfjsLib.getDocument(pdfUrl).promise;
+      console.log("Loading PDF from URL:", pdfUrl);
+
+      let pdfData;
+
+      // Always fetch and validate the data first to handle both blob and regular URLs properly
+      const response = await fetch(pdfUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch PDF data: ${response.statusText}`);
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      console.log("Fetched array buffer size:", arrayBuffer.byteLength);
+
+      // Verify PDF header in the array buffer
+      const uint8Array = new Uint8Array(arrayBuffer);
+      const pdfHeader = String.fromCharCode(...uint8Array.slice(0, 4));
+      console.log("PDF header from data:", pdfHeader);
+
+      if (pdfHeader !== "%PDF") {
+        // If this isn't a valid PDF, it might be encrypted data that needs to be handled differently
+        console.error(
+          "Invalid PDF structure detected. First 20 bytes:",
+          String.fromCharCode(...uint8Array.slice(0, 20))
+        );
+        console.error("This appears to be encrypted data, not a PDF file.");
+        throw new Error(
+          `Invalid PDF structure. Expected %PDF header, got: ${pdfHeader}. This appears to be encrypted data.`
+        );
+      }
+
+      // Additional PDF validation
+      const versionCheck = String.fromCharCode(...uint8Array.slice(0, 8));
+      if (!versionCheck.startsWith("%PDF-1.")) {
+        console.error("Invalid PDF version:", versionCheck);
+        throw new Error(`Invalid PDF version: ${versionCheck}`);
+      }
+
+      console.log("PDF validation passed. Loading with PDF.js");
+      pdfData = { data: uint8Array };
+
+      console.log("Loading PDF document with data:", typeof pdfData);
+      const pdf = await window.pdfjsLib.getDocument(pdfData).promise;
+      console.log("PDF loaded successfully, pages:", pdf.numPages);
+
       setPdfDoc(pdf);
       setTotalPages(pdf.numPages);
       setCurrentPage(1);
     } catch (error) {
       console.error("Error loading PDF:", error);
+      console.error("PDF URL was:", pdfUrl);
+
+      // Provide more helpful error messages
+      if (error.message.includes("encrypted data")) {
+        console.error(
+          "This PDF appears to be encrypted. Make sure it's been properly decrypted before passing to the PDF annotator."
+        );
+      }
     }
   };
 

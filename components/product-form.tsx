@@ -43,6 +43,7 @@ import { ProductData } from "@/utils/parsers/product-parser-functions";
 import { buildSrcSet } from "@/utils/images";
 import { FileUploaderButton } from "./utility-components/file-uploader";
 import { AgreementUploaderButton } from "./utility-components/agreement-uploader";
+import { EncryptedAgreementUploaderButton } from "./utility-components/encrypted-agreement-uploader";
 import currencySelection from "../public/currencySelection.json";
 import {
   NostrContext,
@@ -1041,22 +1042,26 @@ export default function ProductForm({
                   </h3>
                   <p className="text-sm text-gray-400">
                     Upload the herdshare agreement PDF that customers must
-                    review before purchase.
+                    review before purchase. The agreement will be encrypted
+                    using your seller key for security.
                   </p>
-                  <AgreementUploaderButton
+
+                  <EncryptedAgreementUploaderButton
                     isProductUpload={true}
                     className="w-full"
+                    sellerNpub={signerPubKey || ""}
                     fileCallbackOnUpload={(fileUrl) => {
                       setHerdshareAgreementUrl(fileUrl);
                     }}
                   >
                     {herdshareAgreementUrl
-                      ? "Update Agreement"
-                      : "Upload Agreement"}
-                  </AgreementUploaderButton>
+                      ? "Update Encrypted Agreement"
+                      : "Upload Encrypted Agreement"}
+                  </EncryptedAgreementUploaderButton>
+
                   {herdshareAgreementUrl && (
                     <div className="text-sm text-green-600">
-                      ✓ Agreement uploaded successfully
+                      ✓ Encrypted agreement uploaded successfully
                     </div>
                   )}
                 </div>
