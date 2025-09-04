@@ -42,7 +42,6 @@ import { addProductToCache } from "@/utils/nostr/cache-service";
 import { ProductData } from "@/utils/parsers/product-parser-functions";
 import { buildSrcSet } from "@/utils/images";
 import { FileUploaderButton } from "./utility-components/file-uploader";
-import { AgreementUploaderButton } from "./utility-components/agreement-uploader";
 import { EncryptedAgreementUploaderButton } from "./utility-components/encrypted-agreement-uploader";
 import currencySelection from "../public/currencySelection.json";
 import {
@@ -1047,8 +1046,6 @@ export default function ProductForm({
                   </p>
 
                   <EncryptedAgreementUploaderButton
-                    isProductUpload={true}
-                    className="w-full"
                     sellerNpub={signerPubKey || ""}
                     fileCallbackOnUpload={(fileUrl) => {
                       setHerdshareAgreementUrl(fileUrl);

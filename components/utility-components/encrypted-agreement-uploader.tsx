@@ -16,16 +16,12 @@ import { encryptFileWithNip44 } from "@/utils/encryption/file-encryption";
 import { viewEncryptedAgreement } from "@/utils/encryption/agreement-viewer";
 
 interface EncryptedAgreementUploaderButtonProps {
-  isProductUpload?: boolean;
-  className?: string;
   children: React.ReactNode;
   fileCallbackOnUpload: (fileUrl: string) => void;
   sellerNpub: string; // Can be npub or hex pubkey
 }
 
 export function EncryptedAgreementUploaderButton({
-  isProductUpload = false,
-  className = "",
   children,
   fileCallbackOnUpload,
   sellerNpub,
@@ -120,7 +116,7 @@ export function EncryptedAgreementUploaderButton({
   };
 
   return (
-    <div className={className}>
+    <div className="w-full">
       <input
         type="file"
         accept=".pdf"
