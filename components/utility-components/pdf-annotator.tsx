@@ -134,7 +134,7 @@ export const PDFAnnotator: React.FC<PDFAnnotatorProps> = ({
       console.error("PDF URL was:", pdfUrl);
 
       // Provide more helpful error messages
-      if (error.message.includes("encrypted data")) {
+      if (error instanceof Error && error.message.includes("encrypted data")) {
         console.error(
           "This PDF appears to be encrypted. Make sure it's been properly decrypted before passing to the PDF annotator."
         );
