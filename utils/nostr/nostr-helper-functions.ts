@@ -738,7 +738,7 @@ export async function blossomUpload(
       throw new Error("Only images are supported");
   } else {
     if (fileUpload.type !== "application/pdf")
-      throw new Error("Only images are supported");
+      throw new Error("Only PDFs are supported");
   }
 
   const arrayBuffer = await fileUpload.arrayBuffer();

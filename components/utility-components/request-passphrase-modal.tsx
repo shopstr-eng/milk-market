@@ -34,12 +34,6 @@ export default function PassphraseChallengeModal({
   const router = useRouter();
   const passphraseInputRef = useRef<HTMLInputElement>(null);
 
-  const buttonClassName = useMemo(() => {
-    const enabledStyle = WHITEBUTTONCLASSNAMES;
-    const className = "text-white shadow-lg bg-gradient-to-tr" + enabledStyle;
-    return className;
-  }, []);
-
   const onSubmit = () => {
     if (isButtonDisabled && passphraseInputRef.current) {
       passphraseInputRef.current.focus();
@@ -114,7 +108,11 @@ export default function PassphraseChallengeModal({
             Cancel
           </Button>
 
-          <Button className={buttonClassName} type="submit" onClick={onSubmit}>
+          <Button
+            className={WHITEBUTTONCLASSNAMES}
+            type="submit"
+            onClick={onSubmit}
+          >
             Submit
           </Button>
         </ModalFooter>

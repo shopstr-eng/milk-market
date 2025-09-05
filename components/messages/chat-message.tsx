@@ -31,6 +31,7 @@ import {
 } from "../../utils/nostr/nostr-helper-functions";
 import { viewEncryptedAgreement } from "@/utils/encryption/agreement-viewer";
 import { encryptFileWithNip44 } from "@/utils/encryption/file-encryption";
+import FailureModal from "../utility-components/failure-modal";
 
 function isDecodableToken(token: string): boolean {
   try {
@@ -64,12 +65,17 @@ const ChatMessage = ({
   const [currentPdfUrl, setCurrentPdfUrl] = useState("");
   const [isUploading, setIsUploading] = useState(false);
   const [annotations, setAnnotations] = useState<any[]>([]);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [isLoadingAgreement, setIsLoadingAgreement] = useState(false);
   const {
     pubkey: userPubkey,
     npub: userNpub,
     signer,
     isLoggedIn,
   } = useContext(SignerContext);
+
+  const [showFailureModal, setShowFailureModal] = useState(false);
+  const [failureText, setFailureText] = useState("");
 
   useEffect(() => {
     if (messageEvent?.content && messageEvent.content.includes("npub")) {
@@ -184,8 +190,6 @@ const ChatMessage = ({
       formData.append("pdf", pdfBlob, "agreement.pdf");
       formData.append("annotations", JSON.stringify(annotations));
 
-      console.log("Processing PDF with annotations:", annotations);
-
       const processResponse = await fetch("/api/process-pdf-annotations", {
         method: "POST",
         body: formData,
@@ -198,10 +202,6 @@ const ChatMessage = ({
       }
 
       const annotatedPdfBlob = await processResponse.blob();
-      console.log(
-        "PDF processed successfully, blob size:",
-        annotatedPdfBlob.size
-      );
 
       // Now encrypt the annotated PDF using buyer's signature and seller's npub
       const sellerNpub = nip19.npubEncode(productPubkey);
@@ -233,20 +233,16 @@ const ChatMessage = ({
           ? blossomServers
           : ["https://cdn.nostrcheck.me"];
 
-      console.log("Uploading to servers:", servers);
-
       let uploadTags = null;
       let lastError = null;
 
       // Try each server until one succeeds
       for (const server of servers) {
         try {
-          console.log("Trying server:", server);
           uploadTags = await blossomUpload(file, false, signer, [server]);
           if (uploadTags && Array.isArray(uploadTags)) {
             const url = uploadTags.find((tag) => tag[0] === "url")?.[1];
             if (url) {
-              console.log("Upload successful to:", server);
               break;
             }
           }
@@ -270,8 +266,6 @@ const ChatMessage = ({
         throw new Error("Upload succeeded but no URL returned from server");
       }
 
-      console.log("Final encrypted signed PDF URL:", signedPdfUrl);
-
       // Generate random keys for message wrapping
       const { nsec: randomNsecSender, npub: randomNpubSender } =
         await generateKeys();
@@ -285,7 +279,6 @@ const ChatMessage = ({
 
       // Send DM with signed PDF URL to the product owner
       const message = `Here is the encrypted signed herdshare agreement from ${userNpub}: ${signedPdfUrl}`;
-      console.log("new", message);
       const giftWrappedMessageEvent = await constructGiftWrappedEvent(
         userPubkey!,
         productPubkey,
@@ -331,7 +324,10 @@ const ChatMessage = ({
       console.error("Failed to upload signed PDF:", error);
       const errorMessage =
         error instanceof Error ? error.message : "Unknown error occurred";
-      alert(`Failed to upload signed PDF: ${errorMessage}. Please try again.`);
+      setFailureText(
+        `Failed to upload signed PDF: ${errorMessage}. Please try again.`
+      );
+      setShowFailureModal(true);
     } finally {
       setIsUploading(false);
     }
@@ -354,46 +350,41 @@ const ChatMessage = ({
           content.toLowerCase().includes("agreement"));
 
       const handleDownloadPdf = async () => {
+        setIsDownloading(true);
         try {
-          console.log(
-            "Checking if PDF URL needs decryption for download:",
-            herdsharePdfUrl
-          );
-
           const isEncrypted = await checkIfPdfIsEncrypted(herdsharePdfUrl);
 
           let blobToDownload: Blob;
 
           if (isEncrypted) {
-            console.log("Content is encrypted, decrypting for download...");
-
             if (!signer || !isLoggedIn) {
-              alert("Please log in to download encrypted agreements.");
+              setFailureText("Please log in to download encrypted agreements.");
+              setShowFailureModal(true);
               return;
             }
 
             const sellerNpub = getSellerNpubFromTags();
-            console.log("Seller npub for decryption:", sellerNpub);
+
+            // Use peer-to-peer decryption for signed agreements (download)
+            // Use server-side decryption for unsigned agreements
+            const usePeerToPeerDecryption = isSignedAgreement;
 
             blobToDownload = await viewEncryptedAgreement(
               herdsharePdfUrl,
               sellerNpub,
-              signer
+              usePeerToPeerDecryption ? signer : undefined
             );
 
             if (!blobToDownload || blobToDownload.size === 0) {
-              alert("Failed to decrypt agreement or received empty data.");
+              setFailureText(
+                "Failed to decrypt agreement or received empty data."
+              );
+              setShowFailureModal(true);
               return;
             }
 
-            console.log(
-              "Decrypted blob size for download:",
-              blobToDownload.size
-            );
-
             await validatePdfBlob(blobToDownload);
           } else {
-            console.log("Content is not encrypted, downloading directly");
             const response = await fetch(herdsharePdfUrl);
             blobToDownload = await response.blob();
           }
@@ -410,7 +401,10 @@ const ChatMessage = ({
           window.URL.revokeObjectURL(url);
         } catch (error) {
           console.error("Failed to download PDF:", error);
-          alert("Failed to download PDF: " + (error as Error).message);
+          setFailureText("Failed to download PDF: " + (error as Error).message);
+          setShowFailureModal(true);
+        } finally {
+          setIsDownloading(false);
         }
       };
 
@@ -469,53 +463,52 @@ const ChatMessage = ({
       };
 
       const handleViewSigningModal = async () => {
+        setIsLoadingAgreement(true);
         try {
-          console.log("Checking if PDF URL needs decryption:", herdsharePdfUrl);
-
           const isEncrypted = await checkIfPdfIsEncrypted(herdsharePdfUrl);
 
           if (isEncrypted) {
-            console.log("Content is encrypted, decrypting...");
-
             if (!signer || !isLoggedIn) {
-              alert("Please log in to view encrypted agreements.");
+              setFailureText("Please log in to view encrypted agreements.");
+              setShowFailureModal(true);
               return;
             }
 
             const sellerNpub = getSellerNpubFromTags();
-            console.log("Seller npub for decryption:", sellerNpub);
 
+            // Always use server-side decryption for review and sign - don't pass signer
             const decryptedBlob = await viewEncryptedAgreement(
               herdsharePdfUrl,
-              sellerNpub,
-              signer
+              sellerNpub
             );
 
             if (!decryptedBlob || decryptedBlob.size === 0) {
-              alert("Failed to decrypt agreement or received empty data.");
+              setFailureText(
+                "Failed to decrypt agreement or received empty data."
+              );
+              setShowFailureModal(true);
               return;
             }
-
-            console.log("Decrypted blob size:", decryptedBlob.size);
 
             await validatePdfBlob(decryptedBlob);
 
             const blobUrl = URL.createObjectURL(decryptedBlob);
-            console.log("Created blob URL:", blobUrl);
 
             setCurrentPdfUrl(blobUrl);
             setShowPdfModal(true);
           } else {
-            console.log("Content is valid PDF, using directly");
             setCurrentPdfUrl(herdsharePdfUrl);
             setShowPdfModal(true);
           }
         } catch (error) {
           console.error("Error in handleViewSigningModal:", error);
-          alert(
+          setFailureText(
             "An error occurred while trying to view the agreement: " +
               (error as Error).message
           );
+          setShowFailureModal(true);
+        } finally {
+          setIsLoadingAgreement(false);
         }
       };
 
@@ -535,31 +528,12 @@ const ChatMessage = ({
                     : "Herdshare Agreement"}
               </span>
             </div>
-            <div
-              className="h-32 w-full cursor-pointer overflow-hidden rounded border"
-              onClick={() =>
-                isSignedAgreement
-                  ? handleDownloadPdf()
-                  : handleViewSigningModal()
-              }
-            >
-              <iframe
-                src={`https://mozilla.github.io/pdf.js/web/viewer.html?file=${encodeURIComponent(
-                  herdsharePdfUrl
-                )}`}
-                className="pointer-events-none h-full w-full"
-                title="PDF Preview"
-                style={{
-                  transform: "scale(0.5)",
-                  transformOrigin: "top left",
-                  width: "200%",
-                  height: "200%",
-                }}
-              />
-            </div>
+
             <Button
               size="sm"
-              className="mt-2 w-full"
+              className={`mt-2 w-full ${
+                isSignedAgreement ? "text-dark-text" : "text-light-text"
+              }`}
               color={
                 isSignedAgreement
                   ? "success"
@@ -572,14 +546,26 @@ const ChatMessage = ({
                   ? handleDownloadPdf()
                   : handleViewSigningModal()
               }
+              isLoading={
+                (isSignedAgreement && isDownloading) ||
+                (!isSignedAgreement && isLoadingAgreement)
+              }
+              disabled={
+                (isSignedAgreement && isDownloading) ||
+                (!isSignedAgreement && isLoadingAgreement)
+              }
             >
               {isSignedAgreement
-                ? "Download for Your Records"
-                : isEncryptedAgreement
-                  ? content.toLowerCase().includes("signed")
-                    ? "View Encrypted Signed Agreement"
-                    : "View Encrypted Agreement"
-                  : "Review & Sign Agreement"}
+                ? isDownloading
+                  ? "Preparing Download..."
+                  : "Download for Your Records"
+                : isLoadingAgreement
+                  ? "Preparing Agreement..."
+                  : isEncryptedAgreement
+                    ? content.toLowerCase().includes("signed")
+                      ? "View Encrypted Signed Agreement"
+                      : "View Encrypted Agreement"
+                    : "Review & Sign Agreement"}
             </Button>
           </div>
         </div>
@@ -737,6 +723,15 @@ const ChatMessage = ({
           </ModalContent>
         </Modal>
       )}
+
+      <FailureModal
+        bodyText={failureText}
+        isOpen={showFailureModal}
+        onClose={() => {
+          setShowFailureModal(false);
+          setFailureText("");
+        }}
+      />
     </>
   );
 };

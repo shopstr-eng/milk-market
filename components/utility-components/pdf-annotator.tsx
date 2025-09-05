@@ -91,10 +91,6 @@ export const PDFAnnotator: React.FC<PDFAnnotatorProps> = ({
 
   const loadPDFDocument = async () => {
     try {
-      console.log("Loading PDF from URL:", pdfUrl);
-
-      let pdfData;
-
       // Always fetch and validate the data first to handle both blob and regular URLs properly
       const response = await fetch(pdfUrl);
       if (!response.ok) {
@@ -102,12 +98,10 @@ export const PDFAnnotator: React.FC<PDFAnnotatorProps> = ({
       }
 
       const arrayBuffer = await response.arrayBuffer();
-      console.log("Fetched array buffer size:", arrayBuffer.byteLength);
 
       // Verify PDF header in the array buffer
       const uint8Array = new Uint8Array(arrayBuffer);
       const pdfHeader = String.fromCharCode(...uint8Array.slice(0, 4));
-      console.log("PDF header from data:", pdfHeader);
 
       if (pdfHeader !== "%PDF") {
         // If this isn't a valid PDF, it might be encrypted data that needs to be handled differently
@@ -128,12 +122,9 @@ export const PDFAnnotator: React.FC<PDFAnnotatorProps> = ({
         throw new Error(`Invalid PDF version: ${versionCheck}`);
       }
 
-      console.log("PDF validation passed. Loading with PDF.js");
-      pdfData = { data: uint8Array };
+      const pdfData = { data: uint8Array };
 
-      console.log("Loading PDF document with data:", typeof pdfData);
       const pdf = await window.pdfjsLib.getDocument(pdfData).promise;
-      console.log("PDF loaded successfully, pages:", pdf.numPages);
 
       setPdfDoc(pdf);
       setTotalPages(pdf.numPages);

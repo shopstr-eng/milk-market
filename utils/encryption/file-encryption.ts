@@ -166,12 +166,9 @@ export async function decryptFileWithNip44(
   encryptionNpub: string
 ): Promise<Uint8Array> {
   try {
-    console.log("Starting decryption with userNpub:", encryptionNpub);
-
     // Get encryption keys
     const { encryptionPubkey, encryptionNsec } =
       await getEncryptionKeys(encryptionNpub);
-    console.log("Got encryption keys, buyerPubkey:", encryptionPubkey);
 
     // Decode the encryption private key
     const { data: encryptionPrivKey } = nip19.decode(encryptionNsec);
@@ -219,17 +216,6 @@ export async function decryptFileWithNip44(
       parsedData = JSON.parse(jsonString);
     }
 
-    // Decrypt metadata
-    let metadata;
-    try {
-      const metadataJson = nip44.decrypt(parsedData.metadata, conversationKey);
-      metadata = JSON.parse(metadataJson);
-      console.log("Decrypted metadata:", metadata);
-    } catch (metadataError) {
-      console.error("Failed to decrypt metadata:", metadataError);
-      throw new Error("Failed to decrypt file metadata");
-    }
-
     // Decrypt and reconstruct chunks
     let decryptedBase64 = "";
     for (let i = 0; i < parsedData.chunks.length; i++) {
@@ -245,25 +231,10 @@ export async function decryptFileWithNip44(
       }
     }
 
-    console.log("Total decrypted base64 length:", decryptedBase64.length);
-    console.log(
-      "First 100 chars of decrypted base64:",
-      decryptedBase64.substring(0, 100)
-    );
-    console.log(
-      "Last 50 chars of decrypted base64:",
-      decryptedBase64.substring(decryptedBase64.length - 50)
-    );
-
     // Convert back from base64 to binary safely
     try {
       // Clean up the base64 string - remove any whitespace or invalid characters
       const cleanBase64 = decryptedBase64.replace(/[^A-Za-z0-9+/=]/g, "");
-      console.log("Cleaned base64 length:", cleanBase64.length);
-      console.log(
-        "Original vs cleaned length difference:",
-        decryptedBase64.length - cleanBase64.length
-      );
 
       // Validate base64 format
       if (cleanBase64.length % 4 !== 0) {
@@ -274,31 +245,17 @@ export async function decryptFileWithNip44(
       // Test if base64 is valid by trying to decode a small portion first
       try {
         atob(cleanBase64.substring(0, Math.min(100, cleanBase64.length)));
-        console.log("Base64 test decode successful");
       } catch (testError) {
         console.error("Base64 test decode failed:", testError);
         throw new Error("Invalid base64 characters detected");
       }
 
       const binaryString = atob(cleanBase64);
-      console.log("Decoded binary string length:", binaryString.length);
 
       const uint8Array = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
         uint8Array[i] = binaryString.charCodeAt(i);
       }
-
-      console.log("Successfully decrypted file, size:", uint8Array.length);
-      console.log(
-        "First 20 bytes of decrypted file:",
-        Array.from(uint8Array.slice(0, 20))
-          .map((b) => b.toString(16).padStart(2, "0"))
-          .join(" ")
-      );
-      console.log(
-        "First 20 bytes as string:",
-        String.fromCharCode(...uint8Array.slice(0, 20))
-      );
 
       return uint8Array;
     } catch (base64Error) {

@@ -1055,12 +1055,6 @@ export default function ProductForm({
                       ? "Update Encrypted Agreement"
                       : "Upload Encrypted Agreement"}
                   </EncryptedAgreementUploaderButton>
-
-                  {herdshareAgreementUrl && (
-                    <div className="text-sm text-green-600">
-                      ✓ Encrypted agreement uploaded successfully
-                    </div>
-                  )}
                 </div>
               )}
 

@@ -7,11 +7,6 @@ async function decryptFileWithSigner(
   signer: any
 ): Promise<Uint8Array> {
   try {
-    console.log(
-      "Starting signer-based decryption with sellerNpub:",
-      sellerNpub
-    );
-
     // Get seller's pubkey
     let sellerPubkey: string;
     if (sellerNpub.startsWith("npub")) {
@@ -20,8 +15,6 @@ async function decryptFileWithSigner(
     } else {
       sellerPubkey = sellerNpub;
     }
-
-    console.log("Seller pubkey for decryption:", sellerPubkey);
 
     let parsedData;
 
@@ -57,20 +50,6 @@ async function decryptFileWithSigner(
       parsedData = JSON.parse(jsonString);
     }
 
-    // Decrypt metadata using signer
-    let metadata;
-    try {
-      const metadataJson = await signer.decrypt(
-        sellerPubkey,
-        parsedData.metadata
-      );
-      metadata = JSON.parse(metadataJson);
-      console.log("Decrypted metadata:", metadata);
-    } catch (metadataError) {
-      console.error("Failed to decrypt metadata:", metadataError);
-      throw new Error("Failed to decrypt file metadata");
-    }
-
     // Decrypt and reconstruct chunks using signer
     let decryptedBase64 = "";
     for (let i = 0; i < parsedData.chunks.length; i++) {
@@ -86,13 +65,10 @@ async function decryptFileWithSigner(
       }
     }
 
-    console.log("Total decrypted base64 length:", decryptedBase64.length);
-
     // Convert back from base64 to binary safely
     try {
       // Clean up the base64 string - remove any whitespace or invalid characters
       const cleanBase64 = decryptedBase64.replace(/[^A-Za-z0-9+/=]/g, "");
-      console.log("Cleaned base64 length:", cleanBase64.length);
 
       // Validate base64 format
       if (cleanBase64.length % 4 !== 0) {
@@ -101,17 +77,12 @@ async function decryptFileWithSigner(
       }
 
       const binaryString = atob(cleanBase64);
-      console.log("Decoded binary string length:", binaryString.length);
 
       const uint8Array = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
         uint8Array[i] = binaryString.charCodeAt(i);
       }
 
-      console.log(
-        "Successfully decrypted file with signer, size:",
-        uint8Array.length
-      );
       return uint8Array;
     } catch (base64Error) {
       console.error("Error decoding base64:", base64Error);
@@ -183,22 +154,6 @@ export async function viewEncryptedAgreement(
       throw new Error("Decrypted data is too small to be a valid PDF");
     }
 
-    console.log("Decrypted bytes length:", decryptedBytes.length);
-    console.log(
-      "First 50 bytes as hex:",
-      Array.from(decryptedBytes.slice(0, 50))
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join(" ")
-    );
-    console.log(
-      "First 50 bytes as string:",
-      String.fromCharCode(...decryptedBytes.slice(0, 50))
-    );
-    console.log(
-      "Last 20 bytes as string:",
-      String.fromCharCode(...decryptedBytes.slice(-20))
-    );
-
     // Check for PDF header
     const pdfHeader = String.fromCharCode(...decryptedBytes.slice(0, 4));
     if (pdfHeader !== "%PDF") {
@@ -222,8 +177,6 @@ export async function viewEncryptedAgreement(
       console.error("Invalid PDF version:", versionCheck);
       throw new Error(`Invalid PDF version: ${versionCheck}`);
     }
-
-    console.log("PDF validation passed. Creating blob...");
 
     // Create a blob from the decrypted data
     const decryptedBlob = new Blob([decryptedBytes], {
