@@ -1,8 +1,8 @@
-import React from "react";
+import React, { useState } from "react";
 import { useRouter } from "next/router";
 import Head from "next/head";
 import { Button } from "@nextui-org/react";
-import { ArrowLeftIcon } from "@heroicons/react/24/outline";
+import { ArrowLeftIcon, ChevronDownIcon } from "@heroicons/react/24/outline";
 import { BLACKBUTTONCLASSNAMES } from "@/utils/STATIC-VARIABLES";
 
 export default function Faq() {
@@ -135,6 +135,8 @@ export default function Faq() {
     },
   ];
 
+  const [openItemKey, setOpenItemKey] = useState<string | null>(null);
+
   return (
     <>
       <Head>
@@ -203,20 +205,41 @@ export default function Faq() {
                 {section.title}
               </h2>
 
-              <div className="space-y-6">
-                {section.items.map((item, itemIndex) => (
-                  <div
-                    key={itemIndex}
-                    className="rounded-lg border border-gray-200 bg-white p-5 transition-shadow hover:shadow-sm"
-                  >
-                    <h3 className="mb-3 text-lg font-semibold text-light-text">
-                      {item.title}
-                    </h3>
-                    <p className="leading-relaxed text-light-text/90">
-                      {item.content}
-                    </p>
-                  </div>
-                ))}
+              <div className="space-y-4">
+                {section.items.map((item, itemIndex) => {
+                  const currentKey = `${sectionIndex}-${itemIndex}`;
+                  const isOpen = openItemKey === currentKey;
+
+                  return (
+                    <div
+                      key={currentKey}
+                      className="overflow-hidden rounded-lg border border-gray-200 bg-white"
+                    >
+                      <button
+                        onClick={() =>
+                          setOpenItemKey(isOpen ? null : currentKey)
+                        }
+                        className="flex w-full items-center justify-between p-5 text-left duration-150 transition-colors hover:bg-gray-100"
+                      >
+                        <span className="text-lg font-semibold text-light-text">
+                          {item.title}
+                        </span>
+                        <ChevronDownIcon
+                          className={`h-5 w-5 shrink-0 duration-200 transition-transform ${
+                            isOpen ? "rotate-180" : ""
+                          }`}
+                        />
+                      </button>
+                      {isOpen && (
+                        <div className="px-5 pb-5">
+                          <p className="leading-relaxed text-light-text/90">
+                            {item.content}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           ))}
