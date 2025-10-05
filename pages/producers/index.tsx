@@ -14,6 +14,7 @@ import {
   ArrowLeftIcon,
   XMarkIcon,
   InformationCircleIcon,
+  ChevronDownIcon,
 } from "@heroicons/react/24/outline";
 import {
   BLACKBUTTONCLASSNAMES,
@@ -24,6 +25,7 @@ const ProducerGuidePage = () => {
   const router = useRouter();
   const [expandedImage, setExpandedImage] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [openFaqKey, setOpenFaqKey] = useState<string | null>(null);
 
   const handleImageClick = (imageSrc: string) => {
     setExpandedImage(imageSrc);
@@ -34,6 +36,135 @@ const ProducerGuidePage = () => {
     setExpandedImage(null);
     setIsModalOpen(false);
   };
+
+  const producerFaqs = [
+    {
+      id: "passphrase-faq",
+      title: "What is a passphrase? What is it used for?",
+      content:
+        "A passphrase is just a password you create as a user to keep your private key stored safely in your browser so only you can access your account. It is needed for securely sending messages, listing products, or saving profile and shop information on Milk Market.",
+    },
+    {
+      id: "payment-methods-faq",
+      title: "What payment methods do customers use?",
+      content: (
+        <>
+          Milk Market supports Bitcoin payments through Lightning Network and
+          Cashu tokens. You can also arrange cash payments directly with
+          customers during pickup or delivery and other payment options like{" "}
+          <a
+            href="https://cash.app/bitcoin"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-yellow-600 underline hover:text-yellow-500"
+          >
+            Cash App
+          </a>
+          , Venmo, PayPal, etc.
+        </>
+      ),
+    },
+    {
+      id: "bitcoin-exchange-faq",
+      title: "Why Bitcoin? How can I exchange it?",
+      content: (
+        <>
+          <a
+            href="https://bitcoin.rocks/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-yellow-600 underline hover:text-yellow-500"
+          >
+            Bitcoin
+          </a>{" "}
+          is supported because it allows for complete control over your funds
+          and transactions and protects your wealth over time. Payment
+          processors like Stripe, PayPal, etc. can freeze your funds, close your
+          account, or even ban you for selling products they don&apos;t deem
+          acceptable (which raw milk and dairy can easily fall under). If
+          desired, you can exchange it for cash or other currencies at your own
+          pace using tools like{" "}
+          <a
+            href="https://cash.app/bitcoin"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-yellow-600 underline hover:text-yellow-500"
+          >
+            Cash App
+          </a>{" "}
+          or{" "}
+          <a
+            href="https://strike.me/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-yellow-600 underline hover:text-yellow-500"
+          >
+            Strike
+          </a>
+          .
+        </>
+      ),
+    },
+    {
+      id: "listing-passphrase-faq",
+      title: "What is the listing passphrase? How do I get it?",
+      content:
+        "The listing passphrase is a password set by Milk Market to prevent spam and ensure that trusted producers can list products. You can get it by contacting Milk Market or other producers in the Milk Market community.",
+    },
+    {
+      id: "process-payments-faq",
+      title: "How do I process payments?",
+      content: (
+        <>
+          If accepting Bitcoin payments, you can redeem them through the chat
+          interface and directly to the site wallet. With the wallet, you can
+          save your payments or send money to another wallet like{" "}
+          <a
+            href="https://cash.app/bitcoin"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-yellow-600 underline hover:text-yellow-500"
+          >
+            Cash App
+          </a>
+          ,{" "}
+          <a
+            href="https://coinos.io/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-yellow-600 underline hover:text-yellow-500"
+          >
+            Coinos
+          </a>
+          ,{" "}
+          <a
+            href="https://www.minibits.cash/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-yellow-600 underline hover:text-yellow-500"
+          >
+            Minibits
+          </a>
+          , etc. If accepting cash, you can arrange payment during pickup or
+          delivery. With other online fiat options, payment should be delivered
+          with the order to the specified account, so make sure to check your
+          external accounts for any incoming payments.
+        </>
+      ),
+    },
+    {
+      id: "delivery-faq",
+      title: "How do I handle delivery and pickup?",
+      content:
+        "You set your own delivery options - whether you offer farm pickup, local delivery, or meet at farmers markets. Coordinate specific details on your product details page or through the encrypted messaging system with each customer.",
+    },
+    {
+      id: "privacy-faq",
+      title: "Is my communication with customers private?",
+      content:
+        "Yes, all messages are encrypted. Only you and your customers can see your conversations - no third parties have access to your private communications.",
+    },
+  ];
 
   return (
     <>
@@ -524,173 +655,39 @@ const ProducerGuidePage = () => {
                 <h2 className="mb-8 text-center text-2xl font-bold text-dark-text">
                   New Producer FAQ
                 </h2>
-                <div className="space-y-6">
-                  <div
-                    id="passphrase-faq"
-                    className="border-b border-gray-200 pb-6"
-                  >
-                    <h3 className="mb-3 text-lg font-semibold text-dark-text">
-                      What is a passphrase? What is it used for?
-                    </h3>
-                    <p className="text-dark-text">
-                      A passphrase is just a password you create as a user to
-                      keep your private key stored safely in your browser so
-                      only you can access your account. It is needed for
-                      securely sending messages, listing products, or saving
-                      profile and shop information on Milk Market.
-                    </p>
-                  </div>
-
-                  <div
-                    id="payment-methods-faq"
-                    className="border-b border-gray-200 pb-6"
-                  >
-                    <h3 className="mb-3 text-lg font-semibold text-dark-text">
-                      What payment methods do customers use?
-                    </h3>
-                    <p className="text-dark-text">
-                      Milk Market supports Bitcoin payments through Lightning
-                      Network and Cashu tokens. You can also arrange cash
-                      payments directly with customers during pickup or delivery
-                      and other payment options like{" "}
-                      <a
-                        href="https://cash.app/bitcoin"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-yellow-600 underline hover:text-yellow-500"
+                <div className="space-y-4">
+                  {producerFaqs.map((faq, index) => {
+                    const currentKey = `faq-${index}`;
+                    const isOpen = openFaqKey === currentKey;
+                    return (
+                      <div
+                        key={currentKey}
+                        id={faq.id}
+                        className="overflow-hidden rounded-lg border border-gray-700 bg-dark-bg"
                       >
-                        Cash App
-                      </a>
-                      , Venmo, PayPal, etc.
-                    </p>
-                  </div>
-
-                  <div className="border-b border-gray-200 pb-6">
-                    <h3 className="mb-3 text-lg font-semibold text-dark-text">
-                      Why Bitcoin? How can I exchange it?
-                    </h3>
-                    <p className="text-dark-text">
-                      <a
-                        href="https://bitcoin.rocks/"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-yellow-600 underline hover:text-yellow-500"
-                      >
-                        Bitcoin
-                      </a>{" "}
-                      is supported because it allows for complete control over
-                      your funds and transactions and protects your wealth over
-                      time. Payment processors like Stripe, PayPal, etc. can
-                      freeze your funds, close your account, or even ban you for
-                      selling products they don&apos;t deem acceptable (which
-                      raw milk and dairy can easily fall under). If desired, you
-                      can exchange it for cash or other currencies at your own
-                      pace using tools like{" "}
-                      <a
-                        href="https://cash.app/bitcoin"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-yellow-600 underline hover:text-yellow-500"
-                      >
-                        Cash App
-                      </a>{" "}
-                      or{" "}
-                      <a
-                        href="https://strike.me/"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-yellow-600 underline hover:text-yellow-500"
-                      >
-                        Strike
-                      </a>
-                      .
-                    </p>
-                  </div>
-
-                  <div
-                    id="listing-passphrase-faq"
-                    className="border-b border-gray-200 pb-6"
-                  >
-                    <h3 className="mb-3 text-lg font-semibold text-dark-text">
-                      What is the listing passphrase? How do I get it?
-                    </h3>
-                    <p className="text-dark-text">
-                      The listing passphrase is a password set by Milk Market to
-                      prevent spam and ensure that trusted producers can list
-                      products. You can get it by contacting Milk Market or
-                      other producers in the Milk Market community.
-                    </p>
-                  </div>
-
-                  <div
-                    id="process-payments-faq"
-                    className="border-b border-gray-200 pb-6"
-                  >
-                    <h3 className="mb-3 text-lg font-semibold text-dark-text">
-                      How do I process payments?
-                    </h3>
-                    <p className="text-dark-text">
-                      If accepting Bitcoin payments, you can redeem them through
-                      the chat interface and directly to the site wallet. With
-                      the wallet, you can save your payments or send money to
-                      another wallet like{" "}
-                      <a
-                        href="https://cash.app/bitcoin"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-yellow-600 underline hover:text-yellow-500"
-                      >
-                        Cash App
-                      </a>
-                      ,{" "}
-                      <a
-                        href="https://coinos.io/"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-yellow-600 underline hover:text-yellow-500"
-                      >
-                        Coinos
-                      </a>
-                      ,{" "}
-                      <a
-                        href="https://www.minibits.cash/"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-yellow-600 underline hover:text-yellow-500"
-                      >
-                        Minibits
-                      </a>
-                      , etc. If accepting cash, you can arrange payment during
-                      pickup or delivery. With other online fiat options,
-                      payment should be delivered with the order to the
-                      specified account, so make sure to check your external
-                      accounts for any incoming payments.
-                    </p>
-                  </div>
-
-                  <div className="border-b border-gray-200 pb-6">
-                    <h3 className="mb-3 text-lg font-semibold text-dark-text">
-                      How do I handle delivery and pickup?
-                    </h3>
-                    <p className="text-dark-text">
-                      You set your own delivery options - whether you offer farm
-                      pickup, local delivery, or meet at farmers markets.
-                      Coordinate specific details on your product details page
-                      or through the encrypted messaging system with each
-                      customer.
-                    </p>
-                  </div>
-
-                  <div>
-                    <h3 className="mb-3 text-lg font-semibold text-dark-text">
-                      Is my communication with customers private?
-                    </h3>
-                    <p className="text-dark-text">
-                      Yes, all messages are encrypted. Only you and your
-                      customers can see your conversations - no third parties
-                      have access to your private communications.
-                    </p>
-                  </div>
+                        <button
+                          onClick={() =>
+                            setOpenFaqKey(isOpen ? null : currentKey)
+                          }
+                          className="flex w-full items-center justify-between p-5 text-left duration-150 transition-colors hover:bg-white/5"
+                        >
+                          <span className="text-lg font-semibold text-dark-text">
+                            {faq.title}
+                          </span>
+                          <ChevronDownIcon
+                            className={`h-5 w-5 shrink-0 text-dark-text/80 duration-200 transition-transform ${
+                              isOpen ? "rotate-180" : ""
+                            }`}
+                          />
+                        </button>
+                        {isOpen && (
+                          <div className="px-5 pb-5">
+                            <div className="text-dark-text">{faq.content}</div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </CardBody>
             </Card>

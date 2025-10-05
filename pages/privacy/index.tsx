@@ -2,7 +2,19 @@ import React from "react";
 import { useRouter } from "next/router";
 import Head from "next/head";
 import { Button } from "@nextui-org/react";
-import { ArrowLeftIcon } from "@heroicons/react/24/outline";
+import {
+  ArrowLeftIcon,
+  ArrowPathIcon,
+  BoltIcon,
+  ComputerDesktopIcon,
+  DocumentTextIcon,
+  EnvelopeIcon,
+  EyeSlashIcon,
+  GlobeAltIcon,
+  ShieldCheckIcon,
+  ShareIcon,
+  UserCircleIcon,
+} from "@heroicons/react/24/outline";
 import { BLACKBUTTONCLASSNAMES } from "@/utils/STATIC-VARIABLES";
 
 export default function PrivacyPolicy() {
@@ -10,51 +22,61 @@ export default function PrivacyPolicy() {
   const policyContent = [
     {
       title: "Introduction",
+      icon: DocumentTextIcon,
       content:
         "Milk Market is committed to protecting your privacy. As a permissionless marketplace, we minimize data collection and processing to ensure your privacy and security. This policy explains our approach to data handling in the context of a permissionless platform.",
     },
     {
       title: "Information We Don't Collect",
+      icon: EyeSlashIcon,
       content:
         "As a fully permissionless platform with no centralized backend, Milk Market does not collect or store: personal identification information, KYC (Know Your Customer) data, financial information, usage tracking data, or user behavior analytics. All data remains under user control through the Nostr protocol and Bitcoin network.",
     },
     {
       title: "Nostr Protocol Data",
+      icon: GlobeAltIcon,
       content:
         "Communication and listings through the Nostr protocol are distributed across your selected relays and may include: product listings and metadata, public messages and updates, encrypted direct messages (viewable only by intended recipients), and public keys associated with your Nostr identity. Users select which relays to connect to, determining what content they see and share.",
     },
     {
       title: "Bitcoin & Lightning Network Data",
+      icon: BoltIcon,
       content:
         "All transactions occur on the Bitcoin network or Lightning Network and follow their respective privacy models. This may include: transaction amounts, Bitcoin/Lightning addresses or payment requests, and time-stamped records. Cashu ecash transactions provide additional privacy benefits where implemented.",
     },
     {
       title: "Website Usage",
+      icon: ComputerDesktopIcon,
       content:
         "Our website interface is static and does not use cookies or tracking mechanisms. Any data stored is kept locally in your browser and includes: local keys (if using in-browser storage), user preferences, relay selections, and interface settings. Milk Market has no access to this locally stored information.",
     },
     {
       title: "Third-Party Services",
+      icon: ShareIcon,
       content:
         "Users may interact with: Bitcoin network and Lightning Network nodes, Nostr relays (which you select), and self-hosted infrastructure. Each third-party service has its own privacy practices. We recommend reviewing the privacy policies of any relays you connect to or payment processors you utilize.",
     },
     {
       title: "Security Measures",
+      icon: ShieldCheckIcon,
       content:
         "Security is maintained through: open-source code verification (our codebase is publicly available for review), cryptographic protocols for secure communications, Bitcoin network security for transactions, and client-side security measures. Users are responsible for maintaining the security of their private keys and wallets.",
     },
     {
       title: "User Rights and Control",
+      icon: UserCircleIcon,
       content:
         "As a permissionless platform, users maintain full control over their: private keys and funds, product listings, relay selections, communication preferences, and local data storage. You can delete local data at any time through your browser settings. Note that due to the nature of distributed systems, messages and listings published to Nostr relays may persist on those relays according to their individual data retention policies.",
     },
     {
       title: "Changes to Privacy Policy",
+      icon: ArrowPathIcon,
       content:
         "Any updates to this privacy policy will be posted on this page. As a permissionless platform, fundamental changes to data handling are unlikely as the platform operates on open protocols with minimal central coordination.",
     },
     {
       title: "Contact Information",
+      icon: EnvelopeIcon,
       content:
         "For privacy-related questions, you can reach the Milk Market team through our Nostr channels or GitHub repository.",
     },
@@ -126,16 +148,16 @@ export default function PrivacyPolicy() {
             Last updated: 2025-04-25
           </div>
 
-          <div className="space-y-6">
+          <div className="space-y-10 rounded-lg border border-gray-200 bg-white p-6 shadow-sm md:p-10">
             {policyContent.map((section, sectionIndex) => (
-              <div
-                key={sectionIndex}
-                className="rounded-lg border border-gray-200 bg-white p-5 transition-shadow hover:shadow-sm"
-              >
-                <h3 className="mb-3 text-lg font-semibold text-light-text">
-                  {section.title}
-                </h3>
-                <p className="leading-relaxed text-light-text/90">
+              <div key={sectionIndex}>
+                <div className="flex items-center">
+                  <section.icon className="mr-3 h-6 w-6 shrink-0 text-gray-500" />
+                  <h2 className="text-xl font-semibold text-light-text">
+                    {section.title}
+                  </h2>
+                </div>
+                <p className="mt-2 pl-9 leading-relaxed text-light-text/80">
                   {section.content}
                 </p>
               </div>
