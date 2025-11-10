@@ -542,7 +542,7 @@ export async function publishWalletEvent(
     const cashuWalletEvent = {
       kind: 17375,
       tags: [],
-      content: await window.nostr.nip44.encrypt(
+      content: await signer.encrypt(
         userPubkey,
         JSON.stringify(walletContent)
       ),
@@ -924,6 +924,8 @@ const LOCALSTORAGECONSTANTS = {
   bunkerRelays: "bunkerRelays",
   bunkerSecret: "bunkerSecret",
   signer: "signer",
+  nwcString: "nwcString",
+  nwcInfo: "nwcInfo",
 };
 
 export const setLocalStorageDataOnSignIn = ({
@@ -1041,6 +1043,8 @@ export interface LocalStorageInterface {
   bunkerRelays?: string[];
   bunkerSecret?: string;
   signer?: { [key: string]: string };
+  nwcString?: string | null;
+  nwcInfo?: string | null;
   migrationComplete?: boolean;
 }
 
@@ -1061,6 +1065,8 @@ export const getLocalStorageData = (): LocalStorageInterface => {
   let bunkerSecret;
   let signer;
   let migrationComplete;
+  let nwcString;
+  let nwcInfo;
 
   if (typeof window !== "undefined") {
     encryptedPrivateKey = localStorage.getItem(
@@ -1196,6 +1202,14 @@ export const getLocalStorageData = (): LocalStorageInterface => {
           break;
       }
     }
+
+    nwcString = localStorage.getItem(LOCALSTORAGECONSTANTS.nwcString)
+      ? localStorage.getItem(LOCALSTORAGECONSTANTS.nwcString)
+      : null;
+
+    nwcInfo = localStorage.getItem(LOCALSTORAGECONSTANTS.nwcInfo)
+      ? localStorage.getItem(LOCALSTORAGECONSTANTS.nwcInfo)
+      : null;
     migrationComplete = localStorage.getItem("migrationComplete") === "true";
   }
   return {
@@ -1214,6 +1228,8 @@ export const getLocalStorageData = (): LocalStorageInterface => {
     bunkerRelays: bunkerRelays || [],
     bunkerSecret: bunkerSecret?.toString(),
     signer,
+    nwcString: nwcString as string | null,
+    nwcInfo: nwcInfo as string | null,
     migrationComplete: migrationComplete || false,
   };
 };
@@ -1322,3 +1338,13 @@ export async function verifyNip05Identifier(
     return false;
   }
 }
+
+export const saveNWCString = (nwcString: string) => {
+  if (nwcString) {
+    localStorage.setItem(LOCALSTORAGECONSTANTS.nwcString, nwcString);
+  } else {
+    localStorage.removeItem(LOCALSTORAGECONSTANTS.nwcString);
+    localStorage.removeItem(LOCALSTORAGECONSTANTS.nwcInfo);
+  }
+  window.dispatchEvent(new Event("storage"));
+};
