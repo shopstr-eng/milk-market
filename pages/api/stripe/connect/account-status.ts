@@ -25,7 +25,7 @@ export default async function handler(
       return res.status(400).json({ error: "pubkey is required" });
     }
 
-    const authResult = verifyNostrAuth(signedEvent, pubkey);
+    const authResult = verifyNostrAuth(signedEvent, pubkey, "stripe-connect");
     if (!authResult.valid) {
       return res
         .status(401)
