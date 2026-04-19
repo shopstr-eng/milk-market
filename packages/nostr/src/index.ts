@@ -7,17 +7,22 @@ import {
   type Event,
   type EventTemplate,
 } from "nostr-tools";
+import CryptoJS from "crypto-js";
 
 import {
   DEFAULT_SELLER_RELAYS,
+  buildSellerListingTags,
   type NostrEventRecord,
+  type SellerListingDraft,
   type SellerSession,
 } from "@milk-market/domain";
 
 export const NOSTR_PACKAGE_READY = true as const;
 
 const STRIPE_CONNECT_AUTH_KIND = 27235;
+const BLOSSOM_UPLOAD_KIND = 24242;
 const shopPublishPool = new SimplePool();
+const DEFAULT_BLOSSOM_SERVER = "https://cdn.nostrcheck.me";
 
 export type SellerActionAuthTag =
   | "stripe-connect"
@@ -35,6 +40,13 @@ export class SellerNostrError extends Error {
     super(message);
     this.name = "SellerNostrError";
   }
+}
+
+export interface UploadedSellerListingMedia {
+  url: string;
+  sha256: string;
+  size: number;
+  mimeType: string;
 }
 
 function joinUrl(baseUrl: string, path: string): string {
@@ -57,6 +69,84 @@ function getPublishRelays(session: SellerSession): string[] {
     relayList.length > 0 ? relayList : [...DEFAULT_SELLER_RELAYS];
 
   return Array.from(new Set(fallbackRelays));
+}
+
+function getPrimaryRelayHint(session: SellerSession): string {
+  return getPublishRelays(session)[0] ?? "";
+}
+
+function getWebsiteOrigin(baseUrl: string): string {
+  return baseUrl.replace(/\/+$/, "") || "https://milk.market";
+}
+
+function createRandomDTag(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createListingDTag(title: string): string {
+  const normalizedTitle = title.trim();
+  if (!normalizedTitle) {
+    return createRandomDTag("listing");
+  }
+
+  return CryptoJS.SHA256(normalizedTitle).toString(CryptoJS.enc.Hex);
+}
+
+function addPublishedAtTag(tags: string[][]): string[][] {
+  return [
+    ...tags.filter((tag) => tag[0] !== "published_at"),
+    ["published_at", String(Math.floor(Date.now() / 1000))],
+  ];
+}
+
+function createWordArray(bytes: Uint8Array) {
+  const words: number[] = [];
+  for (let index = 0; index < bytes.length; index += 4) {
+    words.push(
+      ((bytes[index] || 0) << 24) |
+        ((bytes[index + 1] || 0) << 16) |
+        ((bytes[index + 2] || 0) << 8) |
+        (bytes[index + 3] || 0)
+    );
+  }
+
+  return CryptoJS.lib.WordArray.create(words, bytes.length);
+}
+
+function toBase64Json(value: unknown): string {
+  return CryptoJS.enc.Base64.stringify(
+    CryptoJS.enc.Utf8.parse(JSON.stringify(value))
+  );
+}
+
+async function deleteCachedEvents(
+  baseUrl: string,
+  eventIds: string[]
+): Promise<void> {
+  if (eventIds.length === 0) {
+    return;
+  }
+
+  const response = await fetch(joinUrl(baseUrl, "/api/db/delete-events"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ eventIds }),
+  });
+
+  if (!response.ok) {
+    throw new SellerNostrError("Failed to delete cached listing events.");
+  }
+}
+
+async function cacheAndPublishEvent(
+  baseUrl: string,
+  session: SellerSession,
+  event: Event
+): Promise<void> {
+  await cacheSignedEvent(baseUrl, event);
+  await publishSignedEvent(session, event);
 }
 
 export function generateSellerNsecCredentials(): {
@@ -287,6 +377,224 @@ export function createSellerShopProfileEventTemplate(
     content,
     kind: 30019,
     tags: [["d", session.pubkey]],
+  };
+}
+
+export function createSellerListingEventTemplate(
+  session: SellerSession,
+  tags: string[][]
+): EventTemplateWithPubkey {
+  const summary = tags.find((tag) => tag[0] === "summary")?.[1] ?? "";
+
+  return {
+    pubkey: session.pubkey,
+    created_at: Math.floor(Date.now() / 1000),
+    content: summary,
+    kind: 30402,
+    tags: addPublishedAtTag(tags),
+  };
+}
+
+export function createSellerListingDeleteEventTemplate(
+  session: SellerSession,
+  eventIds: string[],
+  reason = "Milk Market deletion request"
+): EventTemplateWithPubkey {
+  return {
+    pubkey: session.pubkey,
+    kind: 5,
+    content: reason,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: eventIds.map((eventId) => ["e", eventId]),
+  };
+}
+
+function createSellerListingHandlerEventTemplate(params: {
+  session: SellerSession;
+  handlerDTag: string;
+  origin: string;
+}): EventTemplateWithPubkey {
+  return {
+    pubkey: params.session.pubkey,
+    kind: 31990,
+    tags: [
+      ["d", params.handlerDTag],
+      ["k", "30402"],
+      ["web", `${params.origin}/marketplace/<bech-32>`, "npub"],
+      ["web", `${params.origin}/listing/<bech-32>`, "naddr"],
+    ],
+    content: "",
+    created_at: Math.floor(Date.now() / 1000),
+  };
+}
+
+function createSellerListingRecommendationEventTemplate(params: {
+  session: SellerSession;
+  handlerDTag: string;
+  relayHint: string;
+}): EventTemplateWithPubkey {
+  return {
+    pubkey: params.session.pubkey,
+    kind: 31989,
+    tags: [
+      ["d", "30402"],
+      [
+        "a",
+        `31990:${params.session.pubkey}:${params.handlerDTag}`,
+        params.relayHint,
+        "web",
+      ],
+    ],
+    content: "",
+    created_at: Math.floor(Date.now() / 1000),
+  };
+}
+
+export async function publishSellerListing(params: {
+  baseUrl: string;
+  session: SellerSession;
+  draft: SellerListingDraft;
+  existingEventId?: string;
+  existingDTag?: string;
+}): Promise<Event> {
+  const dTag = params.existingDTag ?? params.draft.dTag ?? createListingDTag(params.draft.title);
+  const relayHint = getPrimaryRelayHint(params.session);
+  const tags = buildSellerListingTags({
+    draft: params.draft,
+    pubkey: params.session.pubkey,
+    dTag,
+    relayHint,
+  });
+  const listingEvent = signEventTemplate(
+    params.session,
+    createSellerListingEventTemplate(params.session, tags)
+  );
+  const handlerDTag = createRandomDTag("listing-handler");
+  const handlerEvent = signEventTemplate(
+    params.session,
+    createSellerListingHandlerEventTemplate({
+      session: params.session,
+      handlerDTag,
+      origin: getWebsiteOrigin(params.baseUrl),
+    })
+  );
+  const recommendationEvent = signEventTemplate(
+    params.session,
+    createSellerListingRecommendationEventTemplate({
+      session: params.session,
+      handlerDTag,
+      relayHint,
+    })
+  );
+
+  await cacheAndPublishEvent(params.baseUrl, params.session, listingEvent);
+  await cacheAndPublishEvent(params.baseUrl, params.session, recommendationEvent);
+  await cacheAndPublishEvent(params.baseUrl, params.session, handlerEvent);
+
+  if (params.existingEventId && params.existingEventId !== listingEvent.id) {
+    await deleteSellerListing({
+      baseUrl: params.baseUrl,
+      session: params.session,
+      eventId: params.existingEventId,
+    });
+  }
+
+  return listingEvent;
+}
+
+export async function deleteSellerListing(params: {
+  baseUrl: string;
+  session: SellerSession;
+  eventId: string;
+  reason?: string;
+}): Promise<Event> {
+  const deleteEvent = signEventTemplate(
+    params.session,
+    createSellerListingDeleteEventTemplate(
+      params.session,
+      [params.eventId],
+      params.reason
+    )
+  );
+
+  await cacheAndPublishEvent(params.baseUrl, params.session, deleteEvent);
+  await deleteCachedEvents(params.baseUrl, [params.eventId]);
+
+  return deleteEvent;
+}
+
+export async function uploadSellerListingMedia(params: {
+  baseUrl: string;
+  session: SellerSession;
+  fileName: string;
+  mimeType: string;
+  bytes: Uint8Array;
+  serverUrl?: string;
+}): Promise<UploadedSellerListingMedia> {
+  if (!params.mimeType.startsWith("image/")) {
+    throw new SellerNostrError("Only image uploads are supported.");
+  }
+
+  const fileBytes = params.bytes;
+  const uploadBytes = Uint8Array.from(fileBytes);
+  const sha256 = CryptoJS.SHA256(createWordArray(fileBytes)).toString(
+    CryptoJS.enc.Hex
+  );
+  const signedEvent = signEventTemplate(params.session, {
+    kind: BLOSSOM_UPLOAD_KIND,
+    content: `Upload ${params.fileName}`,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [
+      ["t", "upload"],
+      ["x", sha256],
+      ["size", String(fileBytes.byteLength)],
+      [
+        "expiration",
+        String(Math.floor((Date.now() + 24 * 60 * 60 * 1000) / 1000)),
+      ],
+    ],
+  });
+
+  await cacheSignedEvent(params.baseUrl, signedEvent);
+
+  const normalizedServerUrl = params.serverUrl?.trim()
+    ? params.serverUrl.trim()
+    : DEFAULT_BLOSSOM_SERVER;
+  const uploadOrigin = normalizedServerUrl.match(/^https?:\/\//i)
+    ? normalizedServerUrl
+    : `https://${normalizedServerUrl}`;
+  const uploadUrl = new URL("/upload", uploadOrigin).toString();
+  const response = await fetch(uploadUrl, {
+    method: "PUT",
+    body: new Blob([uploadBytes], { type: params.mimeType }),
+    headers: {
+      authorization: `Nostr ${toBase64Json(signedEvent)}`,
+      "content-type": params.mimeType,
+    },
+  });
+
+  if (!response.ok) {
+    const details = await response.text().catch(() => "Unknown server error");
+    throw new SellerNostrError(`Image upload failed (${response.status}): ${details}`);
+  }
+
+  const payload = (await response.json()) as Partial<UploadedSellerListingMedia> & {
+    type?: string;
+  };
+  if (!payload.url || !payload.sha256 || typeof payload.size !== "number") {
+    throw new SellerNostrError("Image upload did not return a valid Blossom response.");
+  }
+
+  return {
+    url: payload.url,
+    sha256: payload.sha256,
+    size: payload.size,
+    mimeType:
+      typeof payload.mimeType === "string"
+        ? payload.mimeType
+        : typeof payload.type === "string"
+          ? payload.type
+          : params.mimeType,
   };
 }
 
