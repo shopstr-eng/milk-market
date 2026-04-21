@@ -21,6 +21,7 @@ export const NOSTR_PACKAGE_READY = true as const;
 
 const STRIPE_CONNECT_AUTH_KIND = 27235;
 const BLOSSOM_UPLOAD_KIND = 24242;
+const SIGNED_EVENT_HEADER = "x-signed-event";
 const shopPublishPool = new SimplePool();
 const DEFAULT_BLOSSOM_SERVER = "https://cdn.nostrcheck.me";
 
@@ -80,16 +81,13 @@ function getWebsiteOrigin(baseUrl: string): string {
 }
 
 function createRandomDTag(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `${prefix}-${Array.from(generateSecretKey(), (value) =>
+    value.toString(16).padStart(2, "0")
+  ).join("")}`;
 }
 
-function createListingDTag(title: string): string {
-  const normalizedTitle = title.trim();
-  if (!normalizedTitle) {
-    return createRandomDTag("listing");
-  }
-
-  return CryptoJS.SHA256(normalizedTitle).toString(CryptoJS.enc.Hex);
+function createListingDTag(): string {
+  return createRandomDTag("listing");
 }
 
 function addPublishedAtTag(tags: string[][]): string[][] {
@@ -121,16 +119,31 @@ function toBase64Json(value: unknown): string {
 
 async function deleteCachedEvents(
   baseUrl: string,
+  session: SellerSession,
   eventIds: string[]
 ): Promise<void> {
   if (eventIds.length === 0) {
     return;
   }
 
+  const signedProof = signEventTemplate(session, {
+    kind: STRIPE_CONNECT_AUTH_KIND,
+    created_at: Math.floor(Date.now() / 1000),
+    content: "",
+    tags: [
+      ["action", "delete_cached_events"],
+      ["method", "POST"],
+      ["path", "/api/db/delete-events"],
+      ["pubkey", session.pubkey],
+      ["eventIds", [...eventIds].sort().join(",")],
+    ],
+  });
+
   const response = await fetch(joinUrl(baseUrl, "/api/db/delete-events"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      [SIGNED_EVENT_HEADER]: JSON.stringify(signedProof),
     },
     body: JSON.stringify({ eventIds }),
   });
@@ -457,7 +470,13 @@ export async function publishSellerListing(params: {
   existingEventId?: string;
   existingDTag?: string;
 }): Promise<Event> {
-  const dTag = params.existingDTag ?? params.draft.dTag ?? createListingDTag(params.draft.title);
+  const isExistingListing = Boolean(
+    params.existingEventId ||
+      params.existingDTag ||
+      params.draft.eventId ||
+      params.draft.dTag
+  );
+  const dTag = params.existingDTag ?? params.draft.dTag ?? createListingDTag();
   const relayHint = getPrimaryRelayHint(params.session);
   const tags = buildSellerListingTags({
     draft: params.draft,
@@ -469,27 +488,34 @@ export async function publishSellerListing(params: {
     params.session,
     createSellerListingEventTemplate(params.session, tags)
   );
-  const handlerDTag = createRandomDTag("listing-handler");
-  const handlerEvent = signEventTemplate(
-    params.session,
-    createSellerListingHandlerEventTemplate({
-      session: params.session,
-      handlerDTag,
-      origin: getWebsiteOrigin(params.baseUrl),
-    })
-  );
-  const recommendationEvent = signEventTemplate(
-    params.session,
-    createSellerListingRecommendationEventTemplate({
-      session: params.session,
-      handlerDTag,
-      relayHint,
-    })
-  );
 
   await cacheAndPublishEvent(params.baseUrl, params.session, listingEvent);
-  await cacheAndPublishEvent(params.baseUrl, params.session, recommendationEvent);
-  await cacheAndPublishEvent(params.baseUrl, params.session, handlerEvent);
+
+  if (!isExistingListing) {
+    const handlerEvent = signEventTemplate(
+      params.session,
+      createSellerListingHandlerEventTemplate({
+        session: params.session,
+        handlerDTag: dTag,
+        origin: getWebsiteOrigin(params.baseUrl),
+      })
+    );
+    const recommendationEvent = signEventTemplate(
+      params.session,
+      createSellerListingRecommendationEventTemplate({
+        session: params.session,
+        handlerDTag: dTag,
+        relayHint,
+      })
+    );
+
+    await cacheAndPublishEvent(
+      params.baseUrl,
+      params.session,
+      recommendationEvent
+    );
+    await cacheAndPublishEvent(params.baseUrl, params.session, handlerEvent);
+  }
 
   if (params.existingEventId && params.existingEventId !== listingEvent.id) {
     await deleteSellerListing({
@@ -518,7 +544,7 @@ export async function deleteSellerListing(params: {
   );
 
   await cacheAndPublishEvent(params.baseUrl, params.session, deleteEvent);
-  await deleteCachedEvents(params.baseUrl, [params.eventId]);
+  await deleteCachedEvents(params.baseUrl, params.session, [params.eventId]);
 
   return deleteEvent;
 }

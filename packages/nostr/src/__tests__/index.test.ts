@@ -202,38 +202,75 @@ describe("seller nostr helpers", () => {
     expect(publishSpy).toHaveBeenCalledTimes(3);
   });
 
+  test("new listings with the same title still get different d tags", async () => {
+    const session = createSellerSessionFromNsec(
+      generateSellerNsecCredentials().nsec
+    );
+    const fetchSpy = jest.fn().mockResolvedValue({
+      ok: true,
+      text: async () => "",
+      json: async () => ({ success: true }),
+    } as Response);
+    const publishSpy = jest
+      .spyOn(SimplePool.prototype, "publish")
+      .mockReturnValue([Promise.resolve("ok")] as never);
+    global.fetch = fetchSpy as typeof fetch;
+
+    const firstEvent = await publishSellerListing({
+      baseUrl: "http://127.0.0.1:5000",
+      session,
+      draft: {
+        title: "Fresh milk",
+        description: "Morning batch.",
+        images: ["https://example.com/milk.jpg"],
+        price: "15",
+        currency: "USD",
+        categories: ["Milk"],
+        location: "Jaipur",
+        shippingType: "Free",
+        shippingCost: "",
+        pickupLocations: [],
+        quantity: "2",
+        status: "active",
+      },
+    });
+
+    const secondEvent = await publishSellerListing({
+      baseUrl: "http://127.0.0.1:5000",
+      session,
+      draft: {
+        title: "Fresh milk",
+        description: "Evening batch.",
+        images: ["https://example.com/milk-2.jpg"],
+        price: "16",
+        currency: "USD",
+        categories: ["Milk"],
+        location: "Jaipur",
+        shippingType: "Free",
+        shippingCost: "",
+        pickupLocations: [],
+        quantity: "3",
+        status: "active",
+      },
+    });
+
+    expect(
+      firstEvent.tags.find((tag) => tag[0] === "d")?.[1]
+    ).not.toEqual(secondEvent.tags.find((tag) => tag[0] === "d")?.[1]);
+    expect(fetchSpy).toHaveBeenCalledTimes(6);
+    expect(publishSpy).toHaveBeenCalledTimes(6);
+  });
+
   test("publishing an updated listing preserves the d tag and deletes the old cached event", async () => {
     const session = createSellerSessionFromNsec(
       generateSellerNsecCredentials().nsec
     );
-    const fetchSpy = jest
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        text: async () => "",
-        json: async () => ({ success: true }),
-      } as Response)
-      .mockResolvedValueOnce({
-        ok: true,
-        text: async () => "",
-        json: async () => ({ success: true }),
-      } as Response)
-      .mockResolvedValueOnce({
-        ok: true,
-        text: async () => "",
-        json: async () => ({ success: true }),
-      } as Response)
-      .mockResolvedValueOnce({
-        ok: true,
-        text: async () => "",
-        json: async () => ({ success: true }),
-      } as Response)
-      .mockResolvedValueOnce({
-        ok: true,
-        text: async () => "",
-        json: async () => ({ success: true }),
-      } as Response);
-    jest
+    const fetchSpy = jest.fn().mockResolvedValue({
+      ok: true,
+      text: async () => "",
+      json: async () => ({ success: true }),
+    } as Response);
+    const publishSpy = jest
       .spyOn(SimplePool.prototype, "publish")
       .mockReturnValue([Promise.resolve("ok")] as never);
     global.fetch = fetchSpy as typeof fetch;
@@ -264,12 +301,37 @@ describe("seller nostr helpers", () => {
     expect(listingEvent.tags).toEqual(
       expect.arrayContaining([["d", "stable-d-tag"]])
     );
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(publishSpy).toHaveBeenCalledTimes(2);
     expect(fetchSpy).toHaveBeenLastCalledWith(
       "http://127.0.0.1:5000/api/db/delete-events",
       expect.objectContaining({
         method: "POST",
+        headers: expect.objectContaining({
+          "x-signed-event": expect.any(String),
+        }),
         body: JSON.stringify({ eventIds: ["old-listing-event"] }),
       })
+    );
+    const deleteRequest = fetchSpy.mock.calls.at(-1)?.[1] as
+      | RequestInit
+      | undefined;
+    const deleteHeaders = deleteRequest?.headers as
+      | Record<string, string>
+      | undefined;
+    const signedDeleteEvent = JSON.parse(
+      deleteHeaders?.["x-signed-event"] ?? "{}"
+    ) as { kind: number; pubkey: string; tags: string[][] };
+    expect(signedDeleteEvent.kind).toBe(27235);
+    expect(signedDeleteEvent.pubkey).toBe(session.pubkey);
+    expect(signedDeleteEvent.tags).toEqual(
+      expect.arrayContaining([
+        ["action", "delete_cached_events"],
+        ["method", "POST"],
+        ["path", "/api/db/delete-events"],
+        ["pubkey", session.pubkey],
+        ["eventIds", "old-listing-event"],
+      ])
     );
   });
 
@@ -305,7 +367,30 @@ describe("seller nostr helpers", () => {
       "http://127.0.0.1:5000/api/db/delete-events",
       expect.objectContaining({
         method: "POST",
+        headers: expect.objectContaining({
+          "x-signed-event": expect.any(String),
+        }),
       })
+    );
+    const deleteRequest = fetchSpy.mock.calls.at(-1)?.[1] as
+      | RequestInit
+      | undefined;
+    const deleteHeaders = deleteRequest?.headers as
+      | Record<string, string>
+      | undefined;
+    const signedDeleteEvent = JSON.parse(
+      deleteHeaders?.["x-signed-event"] ?? "{}"
+    ) as { kind: number; pubkey: string; tags: string[][] };
+    expect(signedDeleteEvent.kind).toBe(27235);
+    expect(signedDeleteEvent.pubkey).toBe(session.pubkey);
+    expect(signedDeleteEvent.tags).toEqual(
+      expect.arrayContaining([
+        ["action", "delete_cached_events"],
+        ["method", "POST"],
+        ["path", "/api/db/delete-events"],
+        ["pubkey", session.pubkey],
+        ["eventIds", "listing-event"],
+      ])
     );
   });
 
