@@ -950,6 +950,70 @@ export function affiliatePausedToSellerEmail(params: {
   };
 }
 
+export function signInMagicLinkEmail(params: { signInLink: string }): {
+  subject: string;
+  html: string;
+} {
+  const body = `
+    <h2 style="margin:0 0 16px;color:#111827;font-size:20px;font-weight:700;">Sign in to ${BRAND_NAME}</h2>
+    <p style="margin:0 0 16px;color:#374151;font-size:15px;line-height:1.6;">
+      Click the button below to sign in to your ${BRAND_NAME} account. The link will sign you in for 30 days on this device.
+    </p>
+    <table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0;">
+      <tr>
+        <td style="background-color:#000000;border-radius:6px;padding:12px 24px;">
+          <a href="${esc(
+            params.signInLink
+          )}" style="color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;display:inline-block;">
+            Sign in
+          </a>
+        </td>
+      </tr>
+    </table>
+    <p style="margin:0 0 8px;color:#6b7280;font-size:13px;line-height:1.5;">
+      This link expires in 1 hour and can only be used once. If you didn't request it, you can safely ignore this email.
+    </p>
+    <p style="margin:0;color:#6b7280;font-size:13px;line-height:1.5;">
+      Email-link sign-in lets you read your account and manage your subscriptions through ${BRAND_NAME}. To sign Nostr events you'll still need your nsec or password.
+    </p>`;
+  return {
+    subject: `${BRAND_NAME} — Your sign-in link`,
+    html: baseTemplate("Sign in", body),
+  };
+}
+
+export function subscriptionMagicLinkEmail(params: {
+  manageLink: string;
+  productTitle?: string | null;
+}): { subject: string; html: string } {
+  const productLabel = params.productTitle
+    ? `your subscription to <strong>${esc(params.productTitle)}</strong>`
+    : "your subscription";
+  const body = `
+    <h2 style="margin:0 0 16px;color:#111827;font-size:20px;font-weight:700;">Manage ${productLabel}</h2>
+    <p style="margin:0 0 16px;color:#374151;font-size:15px;line-height:1.6;">
+      Click the button below to open a 15-minute secure session where you can change your shipping address, push the next billing date, or cancel.
+    </p>
+    <table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0;">
+      <tr>
+        <td style="background-color:#000000;border-radius:6px;padding:12px 24px;">
+          <a href="${esc(
+            params.manageLink
+          )}" style="color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;display:inline-block;">
+            Manage subscription
+          </a>
+        </td>
+      </tr>
+    </table>
+    <p style="margin:0;color:#6b7280;font-size:13px;line-height:1.5;">
+      This link expires in 1 hour and can only be used once. After you click it, your management session lasts 15 minutes. If you didn't request this email, you can ignore it.
+    </p>`;
+  return {
+    subject: `${BRAND_NAME} — Manage your subscription`,
+    html: baseTemplate("Manage subscription", body),
+  };
+}
+
 export function accountRecoveryEmail(params: { recoveryLink: string }): {
   subject: string;
   html: string;

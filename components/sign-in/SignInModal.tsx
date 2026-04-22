@@ -1156,14 +1156,24 @@ export default function SignInModal({
                         : "Don't have an account? Sign up"}
                     </button>
                     {!isEmailSignUp && (
-                      <button
-                        className="text-xs text-gray-500 underline hover:text-gray-700"
-                        onClick={() => {
-                          window.open("/auth/recover", "_blank");
-                        }}
-                      >
-                        Forgot your password?
-                      </button>
+                      <>
+                        <button
+                          className="text-xs text-gray-500 underline hover:text-gray-700"
+                          onClick={() => {
+                            window.open("/auth/recover", "_blank");
+                          }}
+                        >
+                          Forgot your password?
+                        </button>
+                        <button
+                          className="text-xs text-gray-500 underline hover:text-gray-700"
+                          onClick={() => {
+                            window.open("/auth/sign-in-link", "_blank");
+                          }}
+                        >
+                          Email me a sign-in link instead
+                        </button>
+                      </>
                     )}
                   </div>
 

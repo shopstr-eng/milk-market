@@ -10,6 +10,8 @@ import {
   returnRequestEmail,
   inquiryNotificationEmail,
   accountRecoveryEmail,
+  signInMagicLinkEmail,
+  subscriptionMagicLinkEmail,
   paymentFailedBuyerEmail,
   paymentFailedSellerEmail,
   transferFailureAlertEmail,
@@ -147,6 +149,26 @@ export async function sendRecoveryEmail(
   recoveryLink: string
 ): Promise<boolean> {
   const { subject, html } = accountRecoveryEmail({ recoveryLink });
+  return sendEmail(recipientEmail, subject, html);
+}
+
+export async function sendSignInMagicLinkEmail(
+  recipientEmail: string,
+  signInLink: string
+): Promise<boolean> {
+  const { subject, html } = signInMagicLinkEmail({ signInLink });
+  return sendEmail(recipientEmail, subject, html);
+}
+
+export async function sendSubscriptionMagicLinkEmail(
+  recipientEmail: string,
+  manageLink: string,
+  productTitle?: string | null
+): Promise<boolean> {
+  const { subject, html } = subscriptionMagicLinkEmail({
+    manageLink,
+    productTitle,
+  });
   return sendEmail(recipientEmail, subject, html);
 }
 

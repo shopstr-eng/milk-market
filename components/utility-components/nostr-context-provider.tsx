@@ -21,6 +21,14 @@ import { NostrNSecSigner } from "@/utils/nostr/signers/nostr-nsec-signer";
 import { needsMigration } from "@/utils/nostr/encryption-migration";
 import MigrationPromptModal from "./migration-prompt-modal";
 
+export interface EmailSessionInfo {
+  email: string;
+  pubkey: string | null;
+  scope: "email_session" | "subscription_session";
+  subscriptionId: string | null;
+  expiresAt: string;
+}
+
 interface SignerContextInterface {
   signer?: NostrSigner;
   isLoggedIn?: boolean;
@@ -28,6 +36,9 @@ interface SignerContextInterface {
   pubkey?: string;
   npub?: string;
   newSigner?: (type: string, args: any) => NostrSigner;
+  emailSession?: EmailSessionInfo | null;
+  refreshEmailSession?: () => Promise<void>;
+  signOutEmailSession?: () => Promise<void>;
 }
 
 export const SignerContext = createContext({
@@ -37,6 +48,9 @@ export const SignerContext = createContext({
   pubkey: "",
   npub: "",
   newSigner: {},
+  emailSession: null,
+  refreshEmailSession: async () => {},
+  signOutEmailSession: async () => {},
 } as SignerContextInterface);
 
 interface NostrContextInterface {
@@ -66,6 +80,49 @@ export function SignerContextProvider({ children }: { children: ReactNode }) {
   const [showMigrationModal, setShowMigrationModal] = useState(false);
   const isLoggedIn = !!(signer && pubkey);
   const lastSuccessfulSignerKeyRef = useRef<string>("");
+  const [emailSession, setEmailSession] = useState<EmailSessionInfo | null>(
+    null
+  );
+
+  const refreshEmailSession = useCallback(async () => {
+    try {
+      const res = await fetch("/api/auth/session", { credentials: "include" });
+      if (!res.ok) {
+        setEmailSession(null);
+        return;
+      }
+      const data = await res.json();
+      if (!data?.authenticated) {
+        setEmailSession(null);
+        return;
+      }
+      setEmailSession({
+        email: data.email,
+        pubkey: data.pubkey ?? null,
+        scope: data.scope,
+        subscriptionId: data.subscriptionId ?? null,
+        expiresAt: data.expiresAt,
+      });
+    } catch {
+      setEmailSession(null);
+    }
+  }, []);
+
+  const signOutEmailSession = useCallback(async () => {
+    try {
+      await fetch("/api/auth/signout", {
+        method: "POST",
+        credentials: "include",
+      });
+    } catch {
+      // best-effort
+    }
+    setEmailSession(null);
+  }, []);
+
+  useEffect(() => {
+    refreshEmailSession();
+  }, [refreshEmailSession]);
 
   const challengeHandler: ChallengeHandler = (
     type,
@@ -274,6 +331,9 @@ export function SignerContextProvider({ children }: { children: ReactNode }) {
           pubkey,
           npub,
           newSigner,
+          emailSession,
+          refreshEmailSession,
+          signOutEmailSession,
         }}
       >
         <PassphraseChallengeModal

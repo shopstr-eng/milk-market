@@ -76,6 +76,7 @@ const SubscriptionManagement = () => {
   const [guestSubId, setGuestSubId] = useState("");
   const [isGuestMode, setIsGuestMode] = useState(false);
   const [guestLookupDone, setGuestLookupDone] = useState(false);
+  const [magicLinkSent, setMagicLinkSent] = useState(false);
 
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [cancelSubscription, setCancelSubscription] =
@@ -97,7 +98,31 @@ const SubscriptionManagement = () => {
   const [randomNpubForReceiver, setRandomNpubForReceiver] = useState("");
   const [randomNsecForReceiver, setRandomNsecForReceiver] = useState("");
 
-  const { signer, pubkey: userPubkey, isLoggedIn } = useContext(SignerContext);
+  const {
+    signer,
+    pubkey: userPubkey,
+    isLoggedIn,
+    emailSession,
+    refreshEmailSession,
+  } = useContext(SignerContext);
+  const hasEmailSession = !!emailSession;
+  const [sessionExpired, setSessionExpired] = useState(false);
+
+  // Surface a clear "your secure link expired" state when a cookie-only write
+  // returns 401, so the user knows to request a fresh magic link instead of
+  // staring at a generic failure.
+  const handleAuthError = async (response: Response): Promise<boolean> => {
+    if (response.status !== 401) return false;
+    setSessionExpired(true);
+    if (refreshEmailSession) {
+      try {
+        await refreshEmailSession();
+      } catch {
+        // best-effort
+      }
+    }
+    return true;
+  };
   const { nostr } = useContext(NostrContext);
 
   const {
@@ -123,26 +148,58 @@ const SubscriptionManagement = () => {
   }, []);
 
   useEffect(() => {
-    if (isLoggedIn && userPubkey) {
+    if ((isLoggedIn && userPubkey) || hasEmailSession) {
       fetchSubscriptions();
     } else {
       setIsLoading(false);
     }
-  }, [isLoggedIn, userPubkey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoggedIn, userPubkey, hasEmailSession]);
 
   const fetchSubscriptions = async () => {
     setIsLoading(true);
     try {
-      const params = userPubkey
-        ? `pubkey=${userPubkey}`
-        : `email=${encodeURIComponent(guestEmail)}`;
-      const response = await fetch(`/api/stripe/get-subscriptions?${params}`);
+      // Priority order:
+      //   1. Nostr signer (pubkey query)
+      //   2. Email-link session (no query, server reads cookie)
+      //   3. Guest lookup (email query)
+      let url = "/api/stripe/get-subscriptions";
+      if (userPubkey) {
+        url += `?pubkey=${userPubkey}`;
+      } else if (hasEmailSession) {
+        // server uses the mm_session cookie
+      } else {
+        url += `?email=${encodeURIComponent(guestEmail)}`;
+      }
+      const response = await fetch(url, { credentials: "include" });
       if (response.ok) {
         const data = await response.json();
         setSubscriptions(data.subscriptions || []);
       }
     } catch (error) {
       console.error("Failed to fetch subscriptions:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleRequestMagicLink = async () => {
+    if (!guestEmail) return;
+    setIsLoading(true);
+    try {
+      const res = await fetch("/api/subscriptions/request-magic-link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: guestEmail,
+          subscriptionId: guestSubId || undefined,
+        }),
+      });
+      if (res.ok) {
+        setMagicLinkSent(true);
+      }
+    } catch (error) {
+      console.error("Failed to request magic link:", error);
     } finally {
       setIsLoading(false);
     }
@@ -186,28 +243,34 @@ const SubscriptionManagement = () => {
     if (!cancelSubscription) return;
     setIsCanceling(true);
     try {
-      if (!signer || !userPubkey) {
-        throw new Error("Sign in with Nostr to manage this subscription");
-      }
       const subscriptionId = cancelSubscription.stripe_subscription_id;
-      const signedEvent = await signer.sign(
-        buildSignedHttpRequestProofTemplate(
-          buildCancelSubscriptionProof({
-            pubkey: userPubkey,
-            subscriptionId,
-          })
-        )
-      );
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (signer && userPubkey) {
+        const signedEvent = await signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildCancelSubscriptionProof({
+              pubkey: userPubkey,
+              subscriptionId,
+            })
+          )
+        );
+        headers[SIGNED_EVENT_HEADER] = JSON.stringify(signedEvent);
+      } else if (!hasEmailSession) {
+        throw new Error(
+          "Sign in with Nostr or use your emailed link to manage this subscription"
+        );
+      }
       const response = await fetch("/api/stripe/cancel-subscription", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
-        },
+        credentials: "include",
+        headers,
         body: JSON.stringify({
           subscriptionId,
         }),
       });
+      if (await handleAuthError(response)) return;
       if (response.ok) {
         setSubscriptions((prev) =>
           prev.map((s) =>
@@ -249,29 +312,35 @@ const SubscriptionManagement = () => {
     if (!dateSubscription || !data.newDate) return;
     setIsUpdatingDate(true);
     try {
-      if (!signer || !userPubkey) {
-        throw new Error("Sign in with Nostr to manage this subscription");
-      }
       const subscriptionId = dateSubscription.stripe_subscription_id;
-      const signedEvent = await signer.sign(
-        buildSignedHttpRequestProofTemplate(
-          buildUpdateSubscriptionProof({
-            pubkey: userPubkey,
-            subscriptionId,
-          })
-        )
-      );
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (signer && userPubkey) {
+        const signedEvent = await signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildUpdateSubscriptionProof({
+              pubkey: userPubkey,
+              subscriptionId,
+            })
+          )
+        );
+        headers[SIGNED_EVENT_HEADER] = JSON.stringify(signedEvent);
+      } else if (!hasEmailSession) {
+        throw new Error(
+          "Sign in with Nostr or use your emailed link to manage this subscription"
+        );
+      }
       const response = await fetch("/api/stripe/update-subscription", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
-        },
+        credentials: "include",
+        headers,
         body: JSON.stringify({
           subscriptionId,
           nextBillingDate: data.newDate,
         }),
       });
+      if (await handleAuthError(response)) return;
       if (response.ok) {
         setSubscriptions((prev) =>
           prev.map((s) =>
@@ -303,30 +372,36 @@ const SubscriptionManagement = () => {
     if (!addressSubscription || !newAddress) return;
     setIsUpdatingAddress(true);
     try {
-      if (!signer || !userPubkey) {
-        throw new Error("Sign in with Nostr to manage this subscription");
-      }
       const subscriptionId = addressSubscription.stripe_subscription_id;
-      const signedEvent = await signer.sign(
-        buildSignedHttpRequestProofTemplate(
-          buildUpdateSubscriptionProof({
-            pubkey: userPubkey,
-            subscriptionId,
-          })
-        )
-      );
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (signer && userPubkey) {
+        const signedEvent = await signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildUpdateSubscriptionProof({
+              pubkey: userPubkey,
+              subscriptionId,
+            })
+          )
+        );
+        headers[SIGNED_EVENT_HEADER] = JSON.stringify(signedEvent);
+      } else if (!hasEmailSession) {
+        throw new Error(
+          "Sign in with Nostr or use your emailed link to manage this subscription"
+        );
+      }
       const response = await fetch("/api/stripe/update-subscription", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
-        },
+        credentials: "include",
+        headers,
         body: JSON.stringify({
           subscriptionId,
           shippingAddress: { address: newAddress },
         }),
       });
 
+      if (await handleAuthError(response)) return;
       if (response.ok) {
         setSubscriptions((prev) =>
           prev.map((s) =>
@@ -439,7 +514,7 @@ const SubscriptionManagement = () => {
     closeButton: "hover:bg-black/5 active:bg-white/10",
   };
 
-  if (!isLoggedIn && !isGuestMode) {
+  if (!isLoggedIn && !isGuestMode && !hasEmailSession) {
     return (
       <div className="max-w-[98vw] min-w-0 bg-white px-4 py-4 sm:py-6">
         <div className="mx-auto w-full max-w-lg">
@@ -481,6 +556,29 @@ const SubscriptionManagement = () => {
                   No subscriptions found for this email.
                 </p>
               )}
+              <div className="mt-2 border-t border-gray-200 pt-3">
+                <p className="mb-2 text-xs text-gray-600">
+                  Want to update your address, push the next billing date, or
+                  cancel without entering it here? We&apos;ll email you a
+                  one-time secure link.
+                </p>
+                <Button
+                  className="w-full border-2 border-black bg-white font-bold text-black"
+                  onClick={handleRequestMagicLink}
+                  isLoading={isLoading}
+                  isDisabled={!guestEmail || magicLinkSent}
+                >
+                  {magicLinkSent
+                    ? "Check your email"
+                    : "Email me a secure link"}
+                </Button>
+                {magicLinkSent && (
+                  <p className="mt-2 text-center text-xs text-gray-600">
+                    If a subscription exists for that email, a link is on its
+                    way.
+                  </p>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -506,6 +604,26 @@ const SubscriptionManagement = () => {
   return (
     <div className="max-w-[98vw] min-w-0 bg-white px-4 py-4 sm:py-6">
       <div className="mx-auto w-full max-w-full min-w-0">
+        {sessionExpired && (
+          <div className="mb-4 rounded-md border-2 border-black bg-yellow-100 p-3 text-sm text-black">
+            Your secure email-link session has expired. Request a fresh link to
+            keep managing this subscription.
+            <div className="mt-2">
+              <Button
+                className="border-2 border-black bg-white font-bold text-black"
+                size="sm"
+                onClick={async () => {
+                  setSessionExpired(false);
+                  setIsGuestMode(false);
+                  setGuestLookupDone(false);
+                  setSubscriptions([]);
+                }}
+              >
+                Request a new link
+              </Button>
+            </div>
+          </div>
+        )}
         <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
           <h1 className="text-3xl font-bold text-black">My Subscriptions</h1>
           {isGuestMode && (

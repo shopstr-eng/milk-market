@@ -429,6 +429,41 @@ CREATE TABLE IF NOT EXISTS account_recovery_tokens (
 CREATE INDEX IF NOT EXISTS idx_recovery_tokens_token ON account_recovery_tokens(token);
 CREATE INDEX IF NOT EXISTS idx_recovery_tokens_email ON account_recovery_tokens(email);
 
+-- Magic-link tokens: single-use links emailed for sign-in or guest subscription self-service.
+CREATE TABLE IF NOT EXISTS magic_link_tokens (
+    id SERIAL PRIMARY KEY,
+    token VARCHAR(255) NOT NULL UNIQUE,
+    email VARCHAR(255) NOT NULL,
+    scope VARCHAR(32) NOT NULL CHECK (scope IN ('email_session', 'subscription_session')),
+    subscription_id TEXT,
+    pubkey VARCHAR(64),
+    expires_at TIMESTAMP NOT NULL,
+    used BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_token ON magic_link_tokens(token);
+CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_email ON magic_link_tokens(email);
+
+-- Magic-link sessions: bearer sessions issued after a magic-link token is consumed.
+CREATE TABLE IF NOT EXISTS magic_link_sessions (
+    id SERIAL PRIMARY KEY,
+    session_token VARCHAR(255) NOT NULL UNIQUE,
+    email VARCHAR(255) NOT NULL,
+    scope VARCHAR(32) NOT NULL CHECK (scope IN ('email_session', 'subscription_session')),
+    pubkey VARCHAR(64),
+    subscription_id TEXT,
+    expires_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_magic_link_sessions_session_token ON magic_link_sessions(session_token);
+CREATE INDEX IF NOT EXISTS idx_magic_link_sessions_email ON magic_link_sessions(email);
+
+-- Speeds up the case-insensitive email lookup used by /api/subscriptions/request-magic-link.
+CREATE INDEX IF NOT EXISTS idx_subscriptions_buyer_email_lower
+    ON subscriptions (LOWER(buyer_email));
+
 -- Centralized inventory tracking
 CREATE TABLE IF NOT EXISTS inventory (
     id SERIAL PRIMARY KEY,
