@@ -1,0 +1,384 @@
+/* eslint-disable @next/next/no-img-element */
+
+import router from "next/router";
+import { useContext, useState, useEffect, useRef } from "react";
+import { useSearchParams } from "next/navigation";
+import DisplayProducts from "../display-products";
+import { SignerContext } from "@/components/utility-components/nostr-context-provider";
+import { Button, Tooltip, useDisclosure } from "@heroui/react";
+import {
+  ArrowUpTrayIcon,
+  Bars3Icon,
+  XMarkIcon,
+} from "@heroicons/react/24/outline";
+import {
+  BLUEBUTTONCLASSNAMES,
+  WHITEBUTTONCLASSNAMES,
+} from "@/utils/STATIC-VARIABLES";
+import SignInModal from "../sign-in/SignInModal";
+import { ShopMapContext } from "@/utils/context/context";
+import { ShopProfile } from "../../utils/types/types";
+import { sanitizeUrl } from "@braintree/sanitize-url";
+import DiscountCodes from "./discount-codes";
+import Affiliates from "./affiliates";
+import ProductPageTemplateForm from "@/components/settings/product-page-template-form";
+import ShopifyMigrationModal from "./shopify-migration-modal";
+
+const StallPage = () => {
+  const { pubkey: usersPubkey } = useContext(SignerContext);
+  const { isOpen, onOpen, onClose } = useDisclosure();
+  const searchParams = useSearchParams();
+
+  const [selectedSection, setSelectedSection] = useState("Listings");
+
+  const [selectedCategories] = useState(new Set<string>([]));
+  const [_categories, setCategories] = useState([""]);
+
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [showMigrationModal, setShowMigrationModal] = useState(false);
+  const [showMigrationTooltip, setShowMigrationTooltip] = useState(false);
+
+  const shopMapContext = useContext(ShopMapContext);
+  const shopProfile: ShopProfile | undefined = usersPubkey
+    ? shopMapContext.shopData.get(usersPubkey)
+    : undefined;
+  const shopBanner = shopProfile?.content.ui.banner ?? "";
+
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setIsMobileMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, []);
+
+  // Auto-open migration modal / tooltip when query param is present
+  useEffect(() => {
+    if (!searchParams || !usersPubkey) return;
+    const migrate = searchParams.get("migrate");
+    if (migrate === "shopify") {
+      setSelectedSection("Listings");
+      setShowMigrationModal(true);
+    } else if (migrate === "tooltip") {
+      setSelectedSection("Listings");
+      setShowMigrationTooltip(true);
+    }
+  }, [searchParams, usersPubkey]);
+
+  const handleOpenMigration = () => {
+    if (usersPubkey) {
+      setShowMigrationTooltip(false);
+      setShowMigrationModal(true);
+    } else {
+      onOpen();
+    }
+  };
+
+  const handleCreateNewListing = () => {
+    if (usersPubkey) {
+      router.push("?addNewListing");
+    } else {
+      onOpen();
+    }
+  };
+
+  const handleEditShop = () => {
+    if (usersPubkey) {
+      router.push("/settings/stall?tab=storefront");
+    } else {
+      onOpen();
+    }
+  };
+
+  const handleViewOrders = () => {
+    if (usersPubkey) {
+      router.push("/orders");
+    } else {
+      onOpen();
+    }
+  };
+
+  const handleManageCommunity = () => {
+    if (usersPubkey) {
+      router.push("/settings/community");
+    } else {
+      onOpen();
+    }
+  };
+
+  const MobileMenu = () => (
+    <div className="shadow-neo absolute top-full left-0 z-20 mt-2 w-48 overflow-hidden rounded-md border-2 border-black !bg-white">
+      <div className="bg-white py-1">
+        <Button
+          className="w-full bg-transparent px-4 py-2 text-left text-sm font-bold text-black hover:bg-gray-100"
+          onClick={() => {
+            setSelectedSection("Listings");
+            setIsMobileMenuOpen(false);
+          }}
+        >
+          Listings
+        </Button>
+        <Button
+          className="w-full bg-transparent px-4 py-2 text-left text-sm font-bold text-black hover:bg-gray-100"
+          onClick={() => {
+            setSelectedSection("Discounts");
+            setIsMobileMenuOpen(false);
+          }}
+        >
+          Discounts
+        </Button>
+        <Button
+          className="w-full bg-transparent px-4 py-2 text-left text-sm font-bold text-black hover:bg-gray-100"
+          onClick={() => {
+            setSelectedSection("Affiliates");
+            setIsMobileMenuOpen(false);
+          }}
+        >
+          Affiliates
+        </Button>
+        <Button
+          className="w-full bg-transparent px-4 py-2 text-left text-sm font-bold text-black hover:bg-gray-100"
+          onClick={() => {
+            setSelectedSection("Templates");
+            setIsMobileMenuOpen(false);
+          }}
+        >
+          Templates
+        </Button>
+        <Button
+          className="w-full bg-transparent px-4 py-2 text-left text-sm font-bold text-black hover:bg-gray-100"
+          onClick={() => {
+            handleViewOrders();
+            setIsMobileMenuOpen(false);
+          }}
+        >
+          Orders
+        </Button>
+        <Button
+          className="w-full bg-transparent px-4 py-2 text-left text-sm font-bold text-black hover:bg-gray-100"
+          onClick={() => {
+            handleManageCommunity();
+            setIsMobileMenuOpen(false);
+          }}
+        >
+          Community
+        </Button>
+        <Button
+          className="w-full bg-transparent px-4 py-2 text-left text-sm font-bold text-black hover:bg-gray-100"
+          onClick={() => {
+            handleOpenMigration();
+            setIsMobileMenuOpen(false);
+          }}
+        >
+          Import from Shopify
+        </Button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="mx-auto h-full w-full bg-white">
+      <div className="flex max-w-[100%] flex-col px-3 pb-2">
+        {shopBanner != "" ? (
+          <>
+            <div className="shadow-neo mb-6 flex h-auto w-full items-center justify-center overflow-hidden rounded-lg border-4 border-black">
+              <img
+                src={sanitizeUrl(shopBanner)}
+                alt="Stall Banner"
+                className="max-h-[210px] w-full object-cover"
+                fetchPriority="high"
+              />
+            </div>
+          </>
+        ) : null}
+
+        {/* Navigation Tabs */}
+        <div className="mb-6 flex items-center justify-between border-b-4 border-black pb-2">
+          <div className="flex items-center gap-2">
+            <div className="relative sm:hidden" ref={menuRef}>
+              <Button
+                className="bg-transparent p-1"
+                onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+              >
+                <Bars3Icon className="h-6 w-6 text-black" />
+              </Button>
+              {isMobileMenuOpen && <MobileMenu />}
+            </div>
+            <div className="hidden gap-6 md:flex">
+              <Button
+                className={`bg-transparent px-0 text-lg font-bold ${
+                  selectedSection === "Listings"
+                    ? "border-b-4 border-black text-black"
+                    : "text-gray-500 hover:text-black"
+                }`}
+                onClick={() => setSelectedSection("Listings")}
+              >
+                Listings
+              </Button>
+              <Button
+                className={`bg-transparent px-0 text-lg font-bold ${
+                  selectedSection === "Discounts"
+                    ? "border-b-4 border-black text-black"
+                    : "text-gray-500 hover:text-black"
+                }`}
+                onClick={() => setSelectedSection("Discounts")}
+              >
+                Discounts
+              </Button>
+              <Button
+                className={`bg-transparent px-0 text-lg font-bold ${
+                  selectedSection === "Affiliates"
+                    ? "border-b-4 border-black text-black"
+                    : "text-gray-500 hover:text-black"
+                }`}
+                onClick={() => setSelectedSection("Affiliates")}
+              >
+                Affiliates
+              </Button>
+              <Button
+                className={`bg-transparent px-0 text-lg font-bold ${
+                  selectedSection === "Templates"
+                    ? "border-b-4 border-black text-black"
+                    : "text-gray-500 hover:text-black"
+                }`}
+                onClick={() => setSelectedSection("Templates")}
+              >
+                Templates
+              </Button>
+              <Button
+                className="bg-transparent px-0 text-lg font-bold text-gray-500 hover:text-black"
+                onClick={() => handleViewOrders()}
+              >
+                Orders
+              </Button>
+              <Button
+                className="bg-transparent px-0 text-lg font-bold text-gray-500 hover:text-black"
+                onClick={() => handleManageCommunity()}
+              >
+                Community
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        {/* Mobile buttons - shown at top on mobile */}
+        <div className="mb-4 flex gap-2 sm:hidden">
+          <Button
+            className={`${BLUEBUTTONCLASSNAMES} flex-1`}
+            onClick={() => handleCreateNewListing()}
+          >
+            Add Listing
+          </Button>
+          <Button
+            className={`${BLUEBUTTONCLASSNAMES} flex-1`}
+            onClick={() => handleEditShop()}
+          >
+            Edit Stall
+          </Button>
+        </div>
+        <div className="mb-4 sm:hidden">
+          <Button
+            className={`${WHITEBUTTONCLASSNAMES} w-full`}
+            startContent={<ArrowUpTrayIcon className="h-4 w-4" />}
+            onClick={handleOpenMigration}
+          >
+            Import from Shopify
+          </Button>
+        </div>
+
+        <div className="flex gap-6">
+          {/* Sidebar */}
+          <div className="hidden w-64 flex-shrink-0 md:block">
+            <div className="space-y-3">
+              <Button
+                className={`${BLUEBUTTONCLASSNAMES} w-full`}
+                onClick={() => handleCreateNewListing()}
+              >
+                Add Listing
+              </Button>
+              <Button
+                className={`${BLUEBUTTONCLASSNAMES} w-full`}
+                onClick={() => handleEditShop()}
+              >
+                Edit Stall
+              </Button>
+              <Tooltip
+                isOpen={showMigrationTooltip}
+                placement="right"
+                showArrow
+                content={
+                  <div className="max-w-xs space-y-2 p-2 text-sm">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="font-bold text-black">
+                        Migrate from Shopify
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowMigrationTooltip(false)}
+                        className="text-black hover:text-gray-700"
+                        aria-label="Dismiss"
+                      >
+                        <XMarkIcon className="h-4 w-4" />
+                      </button>
+                    </div>
+                    <p className="text-black">
+                      Click here to upload your Shopify product export and
+                      publish your catalog as Nostr listings in a few clicks.
+                    </p>
+                  </div>
+                }
+                classNames={{
+                  base: "border-2 border-black bg-white shadow-neo",
+                  content: "bg-white",
+                }}
+              >
+                <Button
+                  className={`${WHITEBUTTONCLASSNAMES} w-full`}
+                  startContent={<ArrowUpTrayIcon className="h-4 w-4" />}
+                  onClick={handleOpenMigration}
+                >
+                  Import from Shopify
+                </Button>
+              </Tooltip>
+            </div>
+          </div>
+
+          {/* Main Content Area */}
+          <div className="min-w-0 flex-1">
+            {usersPubkey && selectedSection === "Listings" && (
+              <DisplayProducts
+                focusedPubkey={usersPubkey}
+                selectedCategories={selectedCategories}
+                selectedLocation={""}
+                selectedSearch={""}
+                isMyListings={true}
+                setCategories={setCategories}
+              />
+            )}
+            {usersPubkey && selectedSection === "Discounts" && (
+              <DiscountCodes />
+            )}
+            {usersPubkey && selectedSection === "Affiliates" && <Affiliates />}
+            {usersPubkey && selectedSection === "Templates" && (
+              <ProductPageTemplateForm />
+            )}
+          </div>
+        </div>
+      </div>
+      <SignInModal isOpen={isOpen} onClose={onClose} />
+      <ShopifyMigrationModal
+        isOpen={showMigrationModal}
+        onClose={() => setShowMigrationModal(false)}
+      />
+    </div>
+  );
+};
+
+export default StallPage;

@@ -214,11 +214,49 @@ export async function PostListing(
     created_at: Math.floor(Date.now() / 1000),
   };
 
+  // Publish the primary listing event and await it so we can return the
+  // signed event to the caller. The recommendation (NIP-89 kind 31989) and
+  // handler (kind 31990) events are non-critical metadata used for app
+  // discovery — fire them in the background so a slow / unreachable relay
+  // can't keep the publish UI spinning.
   const signedEvent = await finalizeAndSendNostrEvent(signer, nostr, event);
-  await finalizeAndSendNostrEvent(signer, nostr, recEvent);
-  await finalizeAndSendNostrEvent(signer, nostr, handlerEvent);
+
+  void finalizeAndSendNostrEvent(signer, nostr, recEvent).catch((err) =>
+    console.warn("Failed to publish recommendation event:", err)
+  );
+  void finalizeAndSendNostrEvent(signer, nostr, handlerEvent).catch((err) =>
+    console.warn("Failed to publish handler event:", err)
+  );
 
   return signedEvent;
+}
+
+export async function republishProductWithPageConfig(
+  rawEvent: NostrEvent,
+  pageConfig: unknown,
+  signer: NostrSigner,
+  nostr: NostrManager
+) {
+  if (!signer) throw new Error("Signer required");
+  if (!nostr) throw new Error("Nostr writer required");
+
+  const tags = rawEvent.tags.filter(
+    (t) => t[0] !== "page_config" && t[0] !== "published_at"
+  );
+  if (pageConfig) {
+    tags.push(["page_config", JSON.stringify(pageConfig)]);
+  }
+  const created_at = Math.floor(Date.now() / 1000);
+  tags.push(["published_at", String(created_at)]);
+
+  const event: EventTemplate = {
+    created_at,
+    kind: 30402,
+    tags,
+    content: rawEvent.content || "",
+  };
+
+  return await finalizeAndSendNostrEvent(signer, nostr, event);
 }
 
 export async function createNostrShopEvent(
@@ -490,10 +528,56 @@ export async function constructMessageGiftWrap(
   return signedEvent;
 }
 
+// Best-effort lookup of the relays a recipient READS from (NIP-65 kind 10002),
+// queried over the buyer's own relays/blastr. Bounded so a slow relay can't
+// stall checkout; returns [] on any failure.
+async function fetchRecipientReadRelays(
+  nostr: NostrManager,
+  recipientPubkey: string,
+  baseRelays: string[]
+): Promise<string[]> {
+  try {
+    // Always include default relays (NIP-65 indexers like purplepag.es /
+    // relay.nostr.band) for the lookup so discovery works even if the buyer's
+    // localStorage relays were customized — and is independent of our server.
+    const lookupRelays = Array.from(
+      new Set([...baseRelays, ...getDefaultRelays()])
+    );
+    const events = await newPromiseWithTimeout<NostrEvent[]>(
+      async (resolve, reject) => {
+        try {
+          const res = await nostr.fetch(
+            [{ kinds: [10002], authors: [recipientPubkey] }],
+            {},
+            lookupRelays
+          );
+          resolve(res);
+        } catch (err) {
+          reject(err as Error);
+        }
+      },
+      { timeout: 4000 }
+    );
+    const out: string[] = [];
+    for (const ev of events) {
+      for (const tag of ev.tags) {
+        // Unmarked ("r", url) = read+write; ("r", url, "read") = read-only.
+        if (tag[0] === "r" && tag[1] && (!tag[2] || tag[2] === "read")) {
+          out.push(tag[1]);
+        }
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export async function sendGiftWrappedMessageEvent(
   nostr: NostrManager,
   giftWrappedMessageEvent: NostrEvent,
-  signer?: NostrSigner
+  signer?: NostrSigner,
+  options?: { deliverToRecipientRelays?: boolean }
 ) {
   const { relays, writeRelays } = getLocalStorageData();
   const allWriteRelays = withBlastr([...writeRelays, ...relays]);
@@ -527,6 +611,47 @@ export async function sendGiftWrappedMessageEvent(
       allWriteRelays,
       signer
     ).catch(console.error);
+  }
+
+  // For order messages the buyer's relays are often not the seller's relays
+  // (e.g. a guest checking out on a custom domain), so the seller's dashboard —
+  // which reads from the seller's own relays — never sees the order. Deliver it
+  // to the recipient's relays via two independent paths. Both are fire-and-
+  // forget so they never add latency to, or change the success of, checkout.
+  if (options?.deliverToRecipientRelays) {
+    const recipient = giftWrappedMessageEvent.tags.find(
+      (t) => t[0] === "p"
+    )?.[1];
+
+    // Fallback path (works even if our server is down): publish straight to the
+    // recipient's relays from the browser, so the dashboard can read it off the
+    // relays via its PWA subscription.
+    if (recipient) {
+      void (async () => {
+        try {
+          const recipientRelays = await fetchRecipientReadRelays(
+            nostr,
+            recipient,
+            allWriteRelays
+          );
+          if (recipientRelays.length > 0) {
+            await nostr.publish(giftWrappedMessageEvent, recipientRelays);
+          }
+        } catch (err) {
+          console.warn("Recipient-relay publish failed (non-fatal):", err);
+        }
+      })();
+    }
+
+    // Primary path: have the server publish to the recipient's relays,
+    // independent of buyer origin/login.
+    void import("@/utils/db/db-client")
+      .then(({ deliverOrderEventsServerSide }) =>
+        deliverOrderEventsServerSide([giftWrappedMessageEvent])
+      )
+      .catch((err) =>
+        console.warn("Server-side order delivery failed (non-fatal):", err)
+      );
   }
 }
 
@@ -1096,18 +1221,23 @@ export async function finalizeAndSendNostrEvent(
         { timeout: 21000 } // 21 second timeout
       );
     } catch (error) {
-      // Timeout or relay publish error - track for retry
+      // Timeout or relay publish error - track for retry in the background
+      // so a stalled NIP-46 sign request inside the tracker can never keep
+      // the publish UI spinning.
       console.warn(
         "Relay publish timed out or failed, but event is saved to database:",
         error
       );
-      const { trackFailedRelayPublish } = await import("@/utils/db/db-client");
-      await trackFailedRelayPublish(
-        signedEvent.id,
-        signedEvent,
-        allWriteRelays,
-        signer
-      ).catch(console.error);
+      void import("@/utils/db/db-client")
+        .then(({ trackFailedRelayPublish }) =>
+          trackFailedRelayPublish(
+            signedEvent.id,
+            signedEvent,
+            allWriteRelays,
+            signer
+          )
+        )
+        .catch(console.error);
     }
 
     // return the signed event to caller so we know generated IDs
@@ -1746,9 +1876,15 @@ export const LogOut = () => {
   window.dispatchEvent(new Event("storage"));
 };
 
-export const decryptNpub = (npub: string) => {
-  const { data } = nip19.decode(npub);
-  return data;
+export const decryptNpub = (npub: string): string | null => {
+  try {
+    const decoded = nip19.decode(npub);
+    return decoded.type === "npub" && typeof decoded.data === "string"
+      ? decoded.data
+      : null;
+  } catch {
+    return null;
+  }
 };
 
 export function nostrExtensionLoaded() {

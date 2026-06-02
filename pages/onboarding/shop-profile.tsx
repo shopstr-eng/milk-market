@@ -7,8 +7,11 @@ import ShopProfileForm from "@/components/settings/shop-profile-form";
 const OnboardingShopProfile = () => {
   const router = useRouter();
 
+  const migrate = router.query.migrate as string | undefined;
+  const migrateQuery = migrate ? `?migrate=${encodeURIComponent(migrate)}` : "";
+
   const handleFinish = () => {
-    router.push("/onboarding/stripe-connect");
+    router.push(`/onboarding/stripe-connect${migrateQuery}`);
   };
 
   return (
@@ -30,7 +33,7 @@ const OnboardingShopProfile = () => {
             </div>
             <div className="mb-6 text-center">
               <h2 className="mb-3 text-2xl font-bold text-black">
-                Step 4: Set Up Your Shop
+                Step 4: Set Up Your Stall
               </h2>
               <p className="font-medium text-black">
                 Set up your shop details or skip this step to finish onboarding.

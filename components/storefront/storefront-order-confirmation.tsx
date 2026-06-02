@@ -1,4 +1,4 @@
-import { useEffect, useState, useContext, useMemo } from "react";
+import { useEffect, useState, useContext, useMemo, useRef } from "react";
 import { useRouter } from "next/router";
 import {
   CheckCircleIcon,
@@ -16,6 +16,7 @@ import parseTags, {
 } from "@/utils/parsers/product-parser-functions";
 import { nip19 } from "nostr-tools";
 import ProductCard from "@/components/utility-components/product-card";
+import { useIsCustomDomain } from "@/utils/storefront/custom-domain-context";
 
 interface OrderSummaryData {
   productTitle: string;
@@ -70,19 +71,33 @@ export default function StorefrontOrderConfirmation({
   const { isLoggedIn } = useContext(SignerContext);
   const productContext = useContext(ProductContext);
   const [orderData, setOrderData] = useState<OrderSummaryData | null>(null);
+  const isCustomDomain = useIsCustomDomain();
+  const homeHref = isCustomDomain ? "/" : `/stall/${shopSlug}`;
+  const ordersHref = isCustomDomain ? "/orders" : `/stall/${shopSlug}/orders`;
 
+  const homeHrefRef = useRef(homeHref);
   useEffect(() => {
+    homeHrefRef.current = homeHref;
+  }, [homeHref]);
+
+  // Only run while we still have no order data. Once it's loaded we must
+  // NOT re-read sessionStorage (it may have been cleared by a sibling tab
+  // or a navigation away) and we must not redirect on subsequent renders
+  // when `shopSlug` arrives async on a custom-domain visit — that was the
+  // root cause of the "order summary flashes then bounces home" bug.
+  useEffect(() => {
+    if (orderData) return;
     const stored = sessionStorage.getItem("orderSummary");
     if (stored) {
       try {
         setOrderData(JSON.parse(stored));
+        return;
       } catch {
-        router.push(`/shop/${shopSlug}`);
+        /* fall through to redirect */
       }
-    } else {
-      router.push(`/shop/${shopSlug}`);
     }
-  }, [router, shopSlug]);
+    router.push(homeHrefRef.current);
+  }, [router, orderData]);
 
   const sellerProducts = useMemo(() => {
     if (!productContext.productEvents) return [];
@@ -134,9 +149,6 @@ export default function StorefrontOrderConfirmation({
       return null;
     }
   };
-
-  const homeHref = `/shop/${shopSlug}`;
-  const ordersHref = `/shop/${shopSlug}/orders`;
 
   if (!orderData) {
     return (

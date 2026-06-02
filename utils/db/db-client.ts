@@ -29,17 +29,53 @@ async function buildSignedRequestHeader(
 }
 
 export async function cacheEventToDatabase(event: NostrEvent): Promise<void> {
+  // Bound the request so a hung DB endpoint can't freeze publish flows
+  // (e.g. listing create/edit, gift-wraps, deletes) indefinitely.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
   try {
     const response = await fetch("/api/db/cache-event", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(event),
+      signal: controller.signal,
     });
     if (!response.ok) {
       console.error("Failed to cache event to database");
     }
   } catch (error) {
     console.error("Failed to cache event to database:", error);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// Ask the server to publish already-signed order gift-wraps to the recipient
+// seller's own relays. Primary, origin/login-independent delivery path that
+// fixes custom-domain orders. Relative URL so it works on custom domains too;
+// keepalive so it still completes if the page navigates after checkout.
+// Non-fatal: failures must never block the payment flow.
+export async function deliverOrderEventsServerSide(
+  events: NostrEvent[]
+): Promise<void> {
+  if (!events || events.length === 0) return;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 12000);
+  try {
+    const response = await fetch("/api/nostr/publish-order-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ events }),
+      signal: controller.signal,
+      keepalive: true,
+    });
+    if (!response.ok) {
+      console.warn("Server-side order delivery responded with an error");
+    }
+  } catch (error) {
+    console.warn("Server-side order delivery failed (non-fatal):", error);
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -94,6 +130,10 @@ export async function trackFailedRelayPublish(
   relays: string[],
   signer?: RequestProofSigner
 ): Promise<void> {
+  // Bound this so a hung tracking endpoint or a stuck NIP-46 sign request
+  // can't keep the publish UI spinning after a relay timeout.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
   try {
     if (!signer) {
       console.warn("Skipping failed relay publish tracking without signer");
@@ -115,9 +155,12 @@ export async function trackFailedRelayPublish(
         ...signedHeaders,
       },
       body: JSON.stringify({ eventId, event, relays }),
+      signal: controller.signal,
     });
   } catch (error) {
     console.error("Failed to track failed relay publish:", error);
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 

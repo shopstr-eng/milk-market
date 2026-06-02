@@ -19,7 +19,7 @@ export default function Tos() {
     {
       title: "3. User Responsibilities",
       content:
-        "Users must maintain the security of their private keys and wallets, understand that transactions are irreversible, verify seller details before purchasing, and comply with local regulations regarding commerce, imports, and taxation. Sellers are responsible for the accuracy of their listings and legal compliance of their products.",
+        "Users must maintain the security of their private keys and wallets, understand that transactions are irreversible, verify seller details before purchasing, and comply with local regulations regarding commerce, imports, and taxation. Vendors are responsible for the accuracy of their listings and legal compliance of their products.",
     },
     {
       title: "4. Prohibited Items",
@@ -34,7 +34,7 @@ export default function Tos() {
     {
       title: "6. Listing Guidelines",
       content:
-        "Listings should contain accurate descriptions, clear images, precise pricing information, and transparent shipping details. Sellers are encouraged to respond promptly to inquiries and maintain professional communication standards.",
+        "Listings should contain accurate descriptions, clear images, precise pricing information, and transparent shipping details. Vendors are encouraged to respond promptly to inquiries and maintain professional communication standards.",
     },
     {
       title: "7. Technical Requirements",
@@ -75,10 +75,8 @@ export default function Tos() {
           name="description"
           content="Read Milk Market's Terms of Service. Understand user responsibilities, prohibited items, transaction risks, and platform guidelines for our decentralized marketplace."
         />
-        <link rel="canonical" href="https://milk.market/terms" />
         <link rel="apple-touch-icon" href="/milk-market.png" />
         <link rel="apple-touch-icon" sizes="180x180" href="/milk-market.png" />
-        <meta property="og:url" content="https://milk.market/terms" />
         <meta property="og:type" content="website" />
         <meta
           property="og:title"
@@ -89,9 +87,6 @@ export default function Tos() {
           content="Read Milk Market's Terms of Service. Understand user responsibilities, prohibited items, transaction risks, and platform guidelines for our decentralized marketplace."
         />
         <meta property="og:image" content="/milk-market.png" />
-        <meta name="twitter:card" content="summary_large_image" />
-        <meta property="twitter:domain" content="https://milk.market" />
-        <meta property="twitter:url" content="https://milk.market/terms" />
         <meta
           name="twitter:title"
           content="Terms of Service - Milk Market | User Agreement"

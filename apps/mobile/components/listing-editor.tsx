@@ -1,11 +1,5 @@
 import { useMemo } from "react";
-import {
-  Image,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { Image, Pressable, StyleSheet, Text, View } from "react-native";
 
 import {
   getKnownSellerListingCategories,
@@ -17,11 +11,7 @@ import {
   type SellerListingStatus,
 } from "@milk-market/domain";
 
-import {
-  ActionButton,
-  SellerCard,
-  SellerField,
-} from "@/components/seller-ui";
+import { ActionButton, SellerCard, SellerField } from "@/components/seller-ui";
 import { sellerThemeTokens } from "@/theme/tokens";
 
 const STATUS_OPTIONS: SellerListingStatus[] = ["active", "inactive"];
@@ -87,7 +77,9 @@ export function ListingEditor({
   const removePickupLocation = (index: number) => {
     onChange({
       ...draft,
-      pickupLocations: draft.pickupLocations.filter((_, itemIndex) => itemIndex !== index),
+      pickupLocations: draft.pickupLocations.filter(
+        (_, itemIndex) => itemIndex !== index
+      ),
     });
   };
 
@@ -142,7 +134,9 @@ export function ListingEditor({
               label="Currency"
               value={draft.currency}
               placeholder="USD"
-              onChangeText={(value) => onChange({ ...draft, currency: value.toUpperCase() })}
+              onChangeText={(value) =>
+                onChange({ ...draft, currency: value.toUpperCase() })
+              }
               autoCapitalize="characters"
               error={errors.currency}
             />
@@ -195,7 +189,9 @@ export function ListingEditor({
         </View>
         {customCategories.length > 0 ? (
           <View style={styles.customTagWrap}>
-            <Text style={styles.sectionLabel}>Other tags already on this listing</Text>
+            <Text style={styles.sectionLabel}>
+              Other tags already on this listing
+            </Text>
             <View style={styles.chipWrap}>
               {customCategories.map((category) => (
                 <Pressable
@@ -252,7 +248,9 @@ export function ListingEditor({
             label="Shipping cost"
             value={draft.shippingCost}
             placeholder="0"
-            onChangeText={(value) => onChange({ ...draft, shippingCost: value })}
+            onChangeText={(value) =>
+              onChange({ ...draft, shippingCost: value })
+            }
             keyboardType="decimal-pad"
             error={errors.shippingCost}
           />
@@ -307,7 +305,9 @@ export function ListingEditor({
           variant="secondary"
           loading={imageLoading}
         />
-        {errors.images ? <Text style={styles.errorText}>{errors.images}</Text> : null}
+        {errors.images ? (
+          <Text style={styles.errorText}>{errors.images}</Text>
+        ) : null}
         {draft.images.length === 0 ? (
           <Text style={styles.helperText}>
             Add at least one image before publishing this listing.
@@ -359,11 +359,15 @@ export function ListingEditor({
             );
           })}
         </View>
-        {errors.status ? <Text style={styles.errorText}>{errors.status}</Text> : null}
+        {errors.status ? (
+          <Text style={styles.errorText}>{errors.status}</Text>
+        ) : null}
       </SellerCard>
 
       {actionError ? <Text style={styles.errorText}>{actionError}</Text> : null}
-      {actionMessage ? <Text style={styles.successText}>{actionMessage}</Text> : null}
+      {actionMessage ? (
+        <Text style={styles.successText}>{actionMessage}</Text>
+      ) : null}
 
       <ActionButton
         label={submitLabel}

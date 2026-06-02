@@ -23,9 +23,13 @@ export type {
   StorefrontPage,
   StorefrontPolicies,
   StorefrontPolicy,
+  StorefrontProductPageConfig,
   StorefrontSection,
   StorefrontSectionType,
+  StorefrontSpecificationItem,
   StorefrontSocialLink,
+  StorefrontSocialPost,
+  StorefrontSocialPostPlatform,
   StorefrontTestimonial,
   StorefrontTimelineItem,
 } from "@milk-market/domain";

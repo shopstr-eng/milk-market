@@ -46,6 +46,10 @@ import {
   isExternalStorefrontHref,
   sanitizeStorefrontNavHref,
 } from "@/utils/storefront-links";
+import {
+  applyCustomDomainHref,
+  useIsCustomDomain,
+} from "@/utils/storefront/custom-domain-context";
 
 const DEFAULT_COLORS: StorefrontColorScheme = {
   primary: "#FFD23F",
@@ -90,6 +94,7 @@ export default function StorefrontLayout({
   const { isLoggedIn, pubkey: userPubkey } = useContext(SignerContext);
   const router = useRouter();
   const { isOpen, onOpen, onClose } = useDisclosure();
+  const isCustomDomain = useIsCustomDomain();
 
   const [shop, setShop] = useState<ShopProfile | undefined>();
   const [storefront, setStorefront] = useState<StorefrontConfig>({});
@@ -177,7 +182,7 @@ export default function StorefrontLayout({
   }, [shopPubkey, productContext.productEvents]);
 
   const profile = profileContext.profileData.get(shopPubkey);
-  const shopName = shop?.content?.name || profile?.content?.name || "Shop";
+  const shopName = shop?.content?.name || profile?.content?.name || "Stall";
   const shopAbout = shop?.content?.about || profile?.content?.about || "";
   const bannerUrl = shop?.content?.ui?.banner || "";
   const pictureUrl =
@@ -185,7 +190,45 @@ export default function StorefrontLayout({
 
   const fontHeading = storefront.fontHeading || "";
   const fontBody = storefront.fontBody || "";
-  const googleFontsUrl = buildGoogleFontsUrl(fontHeading, fontBody);
+  const customFontHeadingUrl = storefront.customFontHeadingUrl || "";
+  const customFontHeadingName = storefront.customFontHeadingName || "";
+  const customFontBodyUrl = storefront.customFontBodyUrl || "";
+  const customFontBodyName = storefront.customFontBodyName || "";
+  const googleFontsUrl = buildGoogleFontsUrl(
+    fontHeading,
+    fontBody,
+    customFontHeadingUrl,
+    customFontBodyUrl
+  );
+
+  const getFontFormat = (url: string): string => {
+    if (url.includes(".woff2")) return "woff2";
+    if (url.includes(".woff")) return "woff";
+    if (url.includes(".otf")) return "opentype";
+    if (url.includes(".ttf")) return "truetype";
+    return "woff2";
+  };
+
+  const customFontFaceCss = useMemo(() => {
+    let css = "";
+    if (customFontHeadingUrl) {
+      const name =
+        customFontHeadingName?.replace(/\.[^.]+$/, "") || "CustomHeading";
+      const format = getFontFormat(customFontHeadingUrl);
+      css += `@font-face { font-family: '${name}'; src: url('${customFontHeadingUrl}') format('${format}'); font-weight: 100 900; font-display: swap; }\n`;
+    }
+    if (customFontBodyUrl && customFontBodyUrl !== customFontHeadingUrl) {
+      const name = customFontBodyName?.replace(/\.[^.]+$/, "") || "CustomBody";
+      const format = getFontFormat(customFontBodyUrl);
+      css += `@font-face { font-family: '${name}'; src: url('${customFontBodyUrl}') format('${format}'); font-weight: 100 900; font-display: swap; }\n`;
+    }
+    return css;
+  }, [
+    customFontHeadingUrl,
+    customFontHeadingName,
+    customFontBodyUrl,
+    customFontBodyName,
+  ]);
 
   const hasSections = storefront.sections && storefront.sections.length > 0;
   const hasNav = storefront.navLinks && storefront.navLinks.length > 0;
@@ -258,7 +301,7 @@ export default function StorefrontLayout({
     if (!alreadyHasShop) {
       const homeIdx = links.findIndex((l) => l.href === "" || l.href === "/");
       links.splice(homeIdx + 1, 0, {
-        label: "Shop",
+        label: "Stall",
         href: "shop",
         isPage: true,
       });
@@ -304,18 +347,31 @@ export default function StorefrontLayout({
     "--sf-text": colors.text,
   } as React.CSSProperties;
 
+  const resolvedHeadingFont = customFontHeadingUrl
+    ? `'${customFontHeadingName?.replace(/\.[^.]+$/, "") || "CustomHeading"}', 'Poppins', sans-serif`
+    : fontHeading
+      ? `'${fontHeading}', sans-serif`
+      : "";
+  const resolvedBodyFont = customFontBodyUrl
+    ? `'${customFontBodyName?.replace(/\.[^.]+$/, "") || "CustomBody"}', 'Poppins', sans-serif`
+    : fontBody
+      ? `'${fontBody}', sans-serif`
+      : "";
+
   const fontStyles = {
-    ...(fontHeading
-      ? { "--font-heading": `'${fontHeading}', sans-serif` }
-      : {}),
-    ...(fontBody ? { "--font-body": `'${fontBody}', sans-serif` } : {}),
+    ...(resolvedHeadingFont ? { "--font-heading": resolvedHeadingFont } : {}),
+    ...(resolvedBodyFont ? { "--font-body": resolvedBodyFont } : {}),
   } as React.CSSProperties;
 
   const defaultFooter: StorefrontFooter = hasFooter
     ? storefront.footer!
     : { showPoweredBy: true };
 
-  const homeHref = shopSlug ? `/shop/${shopSlug}` : "/marketplace";
+  const homeHref = applyCustomDomainHref(
+    shopSlug ? `/stall/${shopSlug}` : "/marketplace",
+    shopSlug,
+    isCustomDomain
+  );
 
   const themedCss = `
     .sf-layout .bg-primary-yellow { background-color: var(--sf-primary) !important; }
@@ -334,6 +390,32 @@ export default function StorefrontLayout({
     .sf-layout .bg-blue-100 { background-color: color-mix(in srgb, var(--sf-accent) 15%, var(--sf-bg)) !important; }
     .sf-layout .hover\\:bg-blue-200:hover { background-color: color-mix(in srgb, var(--sf-accent) 25%, var(--sf-bg)) !important; }
 
+    ${
+      storefront.neoShadows
+        ? `
+    .sf-layout.sf-neo .rounded-lg.border-2,
+    .sf-layout.sf-neo .rounded-xl.border-2,
+    .sf-layout.sf-neo .rounded-2xl.border-2,
+    .sf-layout.sf-neo .rounded.border-2,
+    .sf-layout.sf-neo .rounded-lg.border,
+    .sf-layout.sf-neo .rounded-xl.border,
+    .sf-layout.sf-neo .rounded-2xl.border,
+    .sf-layout.sf-neo .rounded.border,
+    .sf-layout.sf-neo img.border,
+    .sf-layout.sf-neo img.border-2 {
+      box-shadow: 4px 4px 0 var(--sf-secondary) !important;
+    }
+    .sf-layout.sf-neo .rounded-lg.border,
+    .sf-layout.sf-neo .rounded-xl.border,
+    .sf-layout.sf-neo .rounded-2xl.border,
+    .sf-layout.sf-neo .rounded.border {
+      border-width: 2px !important;
+      border-color: var(--sf-secondary) !important;
+    }
+    `
+        : ""
+    }
+
     body.sf-active [data-overlay-container] .border-black { border-color: var(--sf-secondary) !important; }
     body.sf-active [data-overlay-container] .shadow-neo {
       box-shadow: 4px 4px 0 var(--sf-secondary) !important;
@@ -345,6 +427,32 @@ export default function StorefrontLayout({
     body.sf-active [data-overlay-container] .border-primary-yellow { border-color: var(--sf-primary) !important; }
     body.sf-active [data-overlay-container] .font-heading { font-family: var(--font-heading, inherit); }
     body.sf-active [data-overlay-container] .font-body { font-family: var(--font-body, inherit); }
+
+    ${
+      storefront.neoShadows
+        ? `
+    body.sf-active [data-overlay-container] .rounded-lg.border-2,
+    body.sf-active [data-overlay-container] .rounded-xl.border-2,
+    body.sf-active [data-overlay-container] .rounded-2xl.border-2,
+    body.sf-active [data-overlay-container] .rounded.border-2,
+    body.sf-active [data-overlay-container] .rounded-lg.border,
+    body.sf-active [data-overlay-container] .rounded-xl.border,
+    body.sf-active [data-overlay-container] .rounded-2xl.border,
+    body.sf-active [data-overlay-container] .rounded.border,
+    body.sf-active [data-overlay-container] img.border,
+    body.sf-active [data-overlay-container] img.border-2 {
+      box-shadow: 4px 4px 0 var(--sf-secondary) !important;
+    }
+    body.sf-active [data-overlay-container] .rounded-lg.border,
+    body.sf-active [data-overlay-container] .rounded-xl.border,
+    body.sf-active [data-overlay-container] .rounded-2xl.border,
+    body.sf-active [data-overlay-container] .rounded.border {
+      border-width: 2px !important;
+      border-color: var(--sf-secondary) !important;
+    }
+    `
+        : ""
+    }
   `;
 
   if (!shopDataReady) {
@@ -405,14 +513,101 @@ export default function StorefrontLayout({
             <link href={googleFontsUrl} rel="stylesheet" />
           </>
         )}
+        {customFontFaceCss && <style>{customFontFaceCss}</style>}
         <style>{`
           .font-heading { font-family: var(--font-heading, inherit); }
           .font-body { font-family: var(--font-body, inherit); }
+          .sf-layout, .sf-layout p, .sf-layout span, .sf-layout li, .sf-layout a, .sf-layout label, .sf-layout div, .sf-layout input, .sf-layout textarea, .sf-layout select, .sf-layout button {
+            font-family: var(--font-body, inherit);
+          }
+          .sf-layout h1, .sf-layout h2, .sf-layout h3, .sf-layout h4, .sf-layout h5, .sf-layout h6,
+          .sf-layout .font-heading, .sf-layout button.font-heading {
+            font-family: var(--font-heading, var(--font-body, inherit));
+          }
+          body.sf-active [data-overlay-container],
+          body.sf-active [data-overlay-container] p,
+          body.sf-active [data-overlay-container] span,
+          body.sf-active [data-overlay-container] li,
+          body.sf-active [data-overlay-container] a,
+          body.sf-active [data-overlay-container] label,
+          body.sf-active [data-overlay-container] div,
+          body.sf-active [data-overlay-container] button {
+            font-family: var(--font-body, inherit);
+          }
+          body.sf-active [data-overlay-container] h1,
+          body.sf-active [data-overlay-container] h2,
+          body.sf-active [data-overlay-container] h3,
+          body.sf-active [data-overlay-container] h4,
+          body.sf-active [data-overlay-container] h5,
+          body.sf-active [data-overlay-container] h6 {
+            font-family: var(--font-heading, var(--font-body, inherit));
+          }
+          .sf-layout h1, .sf-layout h2, .sf-layout h3, .sf-layout h4, .sf-layout h5, .sf-layout h6,
+          .sf-layout p, .sf-layout span, .sf-layout li, .sf-layout a,
+          .sf-layout td, .sf-layout th, .sf-layout dt, .sf-layout dd,
+          .sf-layout blockquote, .sf-layout figcaption, .sf-layout label {
+            overflow-wrap: anywhere !important;
+            word-break: break-word !important;
+            min-width: 0;
+            max-width: 100%;
+            white-space: normal;
+          }
+          /* Flex/grid children default to min-width: auto and, inside
+             items-center flex columns, size themselves to max-content of
+             their text instead of the parent width. That makes long headings
+             render on one line wider than the viewport. Force every flex/grid
+             item inside a storefront to shrink to 0 and cap at 100% of its
+             parent so the wrapping rules above can take effect. */
+          .sf-layout :where(:is([class*="flex"], [class*="grid"]) > *) {
+            min-width: 0;
+            min-height: 0;
+            max-width: 100%;
+          }
+          .sf-layout img, .sf-layout video, .sf-layout iframe, .sf-layout svg, .sf-layout canvas {
+            max-width: 100%;
+          }
+          .sf-layout pre, .sf-layout code {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            max-width: 100%;
+          }
+          /* Hard viewport clamp: nothing inside a storefront may exceed the
+             screen width on mobile. This is the safety net for fixed-px
+             widths (e.g. social cards, product cards with max-w-sm) and
+             third-party embeds that ignore parent constraints. */
+          .sf-layout, .sf-layout * {
+            box-sizing: border-box;
+          }
+          .sf-layout > *,
+          .sf-layout > * > *,
+          .sf-layout section {
+            max-width: 100vw;
+          }
+          /* Carousel tracks must be allowed to be wider than the viewport so
+             they can scroll horizontally inside their overflow-hidden parent.
+             Re-allow width on track + item, but the outer carousel container
+             itself stays capped via overflow-hidden. */
+          .sf-layout .storefront-social-carousel-track {
+            max-width: none;
+          }
+          /* Round avatars must stay square — flex children get forced to
+             max-width: 100% above, which can squish a fixed h/w image into
+             an oval on narrow screens. Lock their aspect ratio. */
+          .sf-layout img.rounded-full {
+            flex-shrink: 0;
+            aspect-ratio: 1 / 1;
+          }
+          @media (max-width: 640px) {
+            .sf-layout :where(.shadow-neo, [class*="shadow-["]) {
+              max-width: calc(100vw - 1rem);
+            }
+          }
         `}</style>
         <style>{themedCss}</style>
       </Head>
       <div
-        className="sf-layout min-h-screen"
+        className={`sf-layout min-h-screen w-full max-w-full overflow-x-hidden ${storefront.neoShadows ? "sf-neo" : ""}`}
         style={{
           ...cssVars,
           ...fontStyles,
@@ -421,13 +616,13 @@ export default function StorefrontLayout({
         }}
       >
         <nav
-          className="fixed top-0 right-0 left-0 z-50 border-b"
+          className="fixed top-0 right-0 left-0 z-50 h-14 border-b"
           style={{
             backgroundColor: navBg,
             borderColor: navAccent + "33",
           }}
         >
-          <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-2 md:px-6">
+          <div className="mx-auto flex h-full max-w-6xl items-center justify-between px-4 md:px-6">
             <Link href={homeHref} className="flex items-center gap-2">
               {pictureUrl && (
                 <img
@@ -448,10 +643,10 @@ export default function StorefrontLayout({
             {defaultNavLinks.length > 0 && (
               <div className="hidden items-center gap-1 lg:flex">
                 {defaultNavLinks.map((link, idx) => {
-                  const href = sanitizeStorefrontNavHref(
-                    link,
+                  const href = applyCustomDomainHref(
+                    sanitizeStorefrontNavHref(link, shopSlug, homeHref),
                     shopSlug,
-                    homeHref
+                    isCustomDomain
                   );
                   const isActive = currentPage
                     ? link.href === currentPage
@@ -565,10 +760,10 @@ export default function StorefrontLayout({
             >
               {defaultNavLinks.length > 0 &&
                 defaultNavLinks.map((link, idx) => {
-                  const href = sanitizeStorefrontNavHref(
-                    link,
+                  const href = applyCustomDomainHref(
+                    sanitizeStorefrontNavHref(link, shopSlug, homeHref),
                     shopSlug,
-                    homeHref
+                    isCustomDomain
                   );
                   const mobileClass = "block px-6 py-3 text-sm font-medium";
                   const mobileStyle = { color: navText + "CC" };
@@ -640,6 +835,7 @@ export default function StorefrontLayout({
               products={sellerProducts}
               colors={colors}
               shopName={shopName}
+              shopSlug={shopSlug}
             />
           </div>
         ) : currentPage === "order-confirmation" ? (
@@ -813,6 +1009,7 @@ export default function StorefrontLayout({
                     shopPicture={pictureUrl}
                     shopPubkey={shopPubkey}
                     products={sellerProducts}
+                    shopSlug={shopSlug}
                   />
                 ))}
               </div>
@@ -826,6 +1023,7 @@ export default function StorefrontLayout({
                   products={sellerProducts}
                   layout={layout}
                   colors={colors}
+                  shopSlug={shopSlug}
                 />
               </div>
             )}
@@ -842,7 +1040,9 @@ export default function StorefrontLayout({
       </div>
       <SignInModal isOpen={isOpen} onClose={onClose} />
       {storefront.emailPopup?.enabled &&
-        storefront.emailPopup.discountPercentage > 0 && (
+        (storefront.emailPopup.discountPercentage > 0 ||
+          (storefront.emailPopup.shippingDiscountType &&
+            storefront.emailPopup.shippingDiscountType !== "none")) && (
           <StorefrontEmailPopupComponent
             config={storefront.emailPopup}
             colors={colors}
@@ -850,16 +1050,25 @@ export default function StorefrontLayout({
             shopName={shopName}
             fontHeading={fontHeading}
             fontBody={fontBody}
+            neoShadows={storefront.neoShadows}
           />
         )}
     </>
   );
 }
 
-function buildGoogleFontsUrl(heading?: string, body?: string): string | null {
+function buildGoogleFontsUrl(
+  heading?: string,
+  body?: string,
+  customHeadingUrl?: string,
+  customBodyUrl?: string
+): string | null {
   const fonts = new Set<string>();
-  if (heading && GOOGLE_FONT_OPTIONS.includes(heading)) fonts.add(heading);
-  if (body && GOOGLE_FONT_OPTIONS.includes(body)) fonts.add(body);
+  if (heading && !customHeadingUrl && GOOGLE_FONT_OPTIONS.includes(heading))
+    fonts.add(heading);
+  if (body && !customBodyUrl && GOOGLE_FONT_OPTIONS.includes(body))
+    fonts.add(body);
+  if (customHeadingUrl || customBodyUrl) fonts.add("Poppins");
   if (fonts.size === 0) return null;
   const families = Array.from(fonts)
     .map((f) => `family=${f.replace(/ /g, "+")}:wght@400;600;700`)

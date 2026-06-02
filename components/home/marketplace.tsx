@@ -256,7 +256,7 @@ function MarketplacePage({
 
   const handleAddNewListing = () => {
     if (loggedIn) {
-      router.push("/my-listings?addNewListing");
+      router.push("/settings/stall?tab=products&addNewListing");
     } else {
       onOpen();
     }
@@ -450,7 +450,7 @@ function MarketplacePage({
                   setSelectedSection("shop");
                 }}
               >
-                Shop
+                Stall
               </Button>
               <Button
                 className="hover:text-primary-yellow bg-transparent text-lg font-bold text-black sm:text-xl"
@@ -472,9 +472,9 @@ function MarketplacePage({
                 return shopSlug ? (
                   <Button
                     className="text-primary-blue hover:text-primary-yellow bg-transparent text-lg font-bold sm:text-xl"
-                    onClick={() => router.push(`/shop/${shopSlug}`)}
+                    onClick={() => router.push(`/stall/${shopSlug}`)}
                   >
-                    Storefront ↗
+                    Stall ↗
                   </Button>
                 ) : null;
               })()}
@@ -666,7 +666,11 @@ function MarketplacePage({
 
       {/* Floating Add Button */}
       {router.pathname.includes("marketplace") &&
-        !router.asPath.includes("npub1") && (
+        !router.asPath.includes("npub1") &&
+        loggedIn &&
+        userPubkey &&
+        shopMapContext.shopData.has(userPubkey) &&
+        typeof shopMapContext.shopData.get(userPubkey) !== "undefined" && (
           <Button
             radius="full"
             className={`${BLUEBUTTONCLASSNAMES} fixed right-8 bottom-8 z-50 h-16 w-16`}

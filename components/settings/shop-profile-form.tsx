@@ -70,8 +70,10 @@ import {
   PopupFlowStep,
 } from "@/utils/types/types";
 import SectionEditor from "./storefront/section-editor";
+import { useDragReorder } from "@/utils/hooks/useDragReorder";
 import FooterEditor from "./storefront/footer-editor";
 import PageEditor from "./storefront/page-editor";
+import CustomDomainSection from "./custom-domain-section";
 import StorefrontPreviewModal from "./storefront/storefront-preview-modal";
 import StorefrontPreviewPanel from "./storefront/storefront-preview-panel";
 import { sanitizeStorefrontConfigLinks } from "@/utils/storefront-links";
@@ -272,8 +274,19 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
   const [customFontBodyName, setCustomFontBodyName] = useState("");
   const [fontUploadingHeading, setFontUploadingHeading] = useState(false);
   const [fontUploadingBody, setFontUploadingBody] = useState(false);
+  const [neoShadows, setNeoShadows] = useState(false);
   const [sections, setSections] = useState<StorefrontSection[]>([]);
+  const sectionsDnd = useDragReorder(sections, setSections);
   const [newSectionId, setNewSectionId] = useState<string | null>(null);
+  const [sectionFocusTokens, setSectionFocusTokens] = useState<
+    Record<string, number>
+  >({});
+  const handlePreviewSectionClick = (sectionId: string) => {
+    setSectionFocusTokens((prev) => ({
+      ...prev,
+      [sectionId]: (prev[sectionId] || 0) + 1,
+    }));
+  };
   const [pages, setPages] = useState<StorefrontPage[]>([]);
   const [footer, setFooter] = useState<StorefrontFooter>({
     showPoweredBy: true,
@@ -332,6 +345,11 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
   const watchPicture = watch("picture");
   const defaultImage = "/milk-market.png";
 
+  // Track every settings value driving the form so we can detect when any of
+  // them change after a successful save. The "Saved" confirmation should stay
+  // pinned on the button until the seller actually edits something else.
+  const watchedFormValues = watch();
+
   // Tracks whether relay-context data has been applied so DB pre-load doesn't
   // override more authoritative data that arrived later.
   const contextLoadedRef = useRef(false);
@@ -371,6 +389,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
           setCustomFontHeadingName(sf.customFontHeadingName);
         if (sf.customFontBodyUrl) setCustomFontBodyUrl(sf.customFontBodyUrl);
         if (sf.customFontBodyName) setCustomFontBodyName(sf.customFontBodyName);
+        if (typeof sf.neoShadows === "boolean") setNeoShadows(sf.neoShadows);
         if (sf.sections) setSections(sf.sections);
         if (sf.pages) setPages(sf.pages);
         if (sf.footer) setFooter(sf.footer);
@@ -466,6 +485,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
         setCustomFontHeadingName(sf.customFontHeadingName);
       if (sf.customFontBodyUrl) setCustomFontBodyUrl(sf.customFontBodyUrl);
       if (sf.customFontBodyName) setCustomFontBodyName(sf.customFontBodyName);
+      if (typeof sf.neoShadows === "boolean") setNeoShadows(sf.neoShadows);
       if (sf.sections) setSections(sf.sections);
       if (sf.pages) setPages(sf.pages);
       if (sf.footer) setFooter(sf.footer);
@@ -712,6 +732,90 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
     };
   };
 
+  // Snapshot-based reset for the "Saved" pill: once we successfully save we
+  // capture the current settings on the next render. Any subsequent change to
+  // a tracked field (RHF input, picker, image, checkbox, color, font, page
+  // builder section, etc.) makes the snapshot diverge and flips the button
+  // back to its default "Save" label. We compare via JSON so equal value sets
+  // — including data being re-hydrated from the relay context after our own
+  // save publishes — don't trigger a false negative.
+  const savedSettingsSnapshotRef = useRef<string | null>(null);
+  const settingsSnapshot = useMemo(
+    () =>
+      JSON.stringify({
+        form: watchedFormValues,
+        notificationEmail,
+        freeShippingThreshold,
+        freeShippingCurrency,
+        paymentMethodDiscounts,
+        shopSlug,
+        colorScheme,
+        isCustomColorScheme,
+        productLayout,
+        landingPageStyle,
+        fontHeading,
+        fontBody,
+        customFontHeadingUrl,
+        customFontHeadingName,
+        customFontBodyUrl,
+        customFontBodyName,
+        neoShadows,
+        sections,
+        pages,
+        footer,
+        navLinks,
+        navColors,
+        footerColors,
+        showCommunityPage,
+        showWalletPage,
+        emailPopup,
+        seoMeta,
+      }),
+    [
+      watchedFormValues,
+      notificationEmail,
+      freeShippingThreshold,
+      freeShippingCurrency,
+      paymentMethodDiscounts,
+      shopSlug,
+      colorScheme,
+      isCustomColorScheme,
+      productLayout,
+      landingPageStyle,
+      fontHeading,
+      fontBody,
+      customFontHeadingUrl,
+      customFontHeadingName,
+      customFontBodyUrl,
+      customFontBodyName,
+      neoShadows,
+      sections,
+      pages,
+      footer,
+      navLinks,
+      navColors,
+      footerColors,
+      showCommunityPage,
+      showWalletPage,
+      emailPopup,
+      seoMeta,
+    ]
+  );
+  useEffect(() => {
+    if (!isSaved) {
+      savedSettingsSnapshotRef.current = null;
+      return;
+    }
+    if (savedSettingsSnapshotRef.current === null) {
+      savedSettingsSnapshotRef.current = settingsSnapshot;
+      return;
+    }
+    if (savedSettingsSnapshotRef.current !== settingsSnapshot) {
+      setIsSaved(false);
+      savedSettingsSnapshotRef.current = null;
+    }
+  }, [isSaved, settingsSnapshot]);
+
   const onSubmit = async (data: { [x: string]: string }) => {
     if (!shopSlug || shopSlug.trim() === "") {
       setShopSlugRequired(true);
@@ -771,8 +875,16 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
         customFontHeadingName: customFontHeadingName || undefined,
         customFontBodyUrl: customFontBodyUrl || undefined,
         customFontBodyName: customFontBodyName || undefined,
+        neoShadows: neoShadows || undefined,
         sections: sections.length > 0 ? sections : undefined,
         pages: pages.length > 0 ? pages : undefined,
+        // Preserve productPageDefaults exactly as it currently exists on the
+        // shop event. This field is owned by the Templates tab in Market
+        // Management; reading it from the latest relay-context content here
+        // ensures concurrent edits from that form are never overwritten by a
+        // storefront save.
+        productPageDefaults: (existingContent as any)?.storefront
+          ?.productPageDefaults,
         footer,
         navLinks: navLinks.length > 0 ? navLinks : undefined,
         navColors:
@@ -824,12 +936,11 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
             signedEvent,
           }),
         });
-      } catch (e) {}
+      } catch {}
     }
 
     setIsUploadingShopProfile(false);
     setIsSaved(true);
-    setTimeout(() => setIsSaved(false), 3000);
 
     if (isOnboarding) {
       router.push("/onboarding/stripe-connect");
@@ -842,11 +953,11 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
 
   return (
     <>
-      <div className="mb-8 xl:max-w-[600px]">
+      <div className="mx-auto mb-8 lg:max-w-[600px]">
         <div className="bg-primary-blue relative flex h-48 items-center justify-center overflow-hidden rounded-xl border-3 border-black">
           {watchBanner ? (
             <img
-              alt={"Shop Banner Image"}
+              alt={"Stall Banner Image"}
               src={watchBanner}
               className="absolute inset-0 h-full w-full object-cover"
             />
@@ -861,15 +972,20 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
           >
             Upload Banner
           </FileUploaderButton>
+          {watchBanner && (
+            <span className="absolute bottom-2 left-2 z-20 rounded bg-black/60 px-2 py-1 text-[11px] text-white">
+              Recommended: 1400 × 400 px
+            </span>
+          )}
         </div>
 
-        <div className="flex items-center justify-center">
+        <div className="flex flex-col items-center justify-center">
           <div className="relative mt-[-4rem] h-32 w-32">
             <div className="relative h-full w-full overflow-hidden rounded-full border-4 border-black bg-white">
               {watchPicture ? (
                 <Image
                   src={watchPicture}
-                  alt="Shop Logo"
+                  alt="Stall Logo"
                   className="h-full w-full rounded-full object-cover"
                   classNames={{
                     wrapper: "!max-w-full w-full h-full",
@@ -878,7 +994,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
               ) : (
                 <Image
                   src={defaultImage}
-                  alt="Shop Logo"
+                  alt="Stall Logo"
                   className="h-full w-full rounded-full object-cover"
                   classNames={{
                     wrapper: "!max-w-full w-full h-full",
@@ -892,11 +1008,14 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
               imgCallbackOnUpload={(imgUrl) => setValue("picture", imgUrl)}
             />
           </div>
+          <p className="mt-2 text-[11px] text-gray-500">
+            Stall logo — recommended: 400 × 400 px (square)
+          </p>
         </div>
       </div>
 
       <form onSubmit={handleSubmit(onSubmit as any)} className="space-y-6">
-        <div className="space-y-6 xl:max-w-[600px]">
+        <div className="mx-auto space-y-6 lg:max-w-[600px]">
           <Controller
             name="name"
             control={control}
@@ -915,7 +1034,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
               return (
                 <div>
                   <label className="mb-2 block text-base font-bold text-black">
-                    Shop Name
+                    Stall Name
                   </label>
                   <Input
                     classNames={{
@@ -1012,7 +1131,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
             </div>
             {freeShippingThreshold && parseFloat(freeShippingThreshold) > 0 && (
               <p className="mt-2 text-sm text-green-600">
-                Buyers will get free shipping on orders of{" "}
+                Shoppers will get free shipping on orders of{" "}
                 {parseFloat(freeShippingThreshold).toFixed(2)}{" "}
                 {freeShippingCurrency} or more from your shop.
               </p>
@@ -1055,8 +1174,8 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                 </label>
                 <p className="mb-3 text-sm text-gray-500">
                   Offer flat percentage discounts for specific payment methods.
-                  Buyers will see the discounted price on each payment button at
-                  checkout.
+                  Shoppers will see the discounted price on each payment button
+                  at checkout.
                 </p>
                 <div className="space-y-3">
                   {availableMethods.map((method) => (
@@ -1119,13 +1238,13 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
         {!isOnboarding && (
           <>
             <div className="border-t-4 border-black pt-6">
-              <div className="flex items-start gap-6 xl:gap-0">
-                <div className="w-full xl:h-[calc(100vh-6rem)] xl:w-[45%] xl:overflow-y-auto xl:pr-6">
+              <div className="flex items-start gap-6 lg:gap-0">
+                <div className="w-full lg:h-[calc(100vh-6rem)] lg:w-[45%] lg:overflow-y-auto lg:pr-6">
                   <h2 className="mb-4 text-xl font-bold text-black">
-                    Storefront Settings
+                    Stall Settings
                   </h2>
                   <p className="mb-6 text-sm text-gray-500">
-                    Customize your standalone shop page. Buyers can visit your
+                    Customize your standalone shop page. Shoppers can visit your
                     storefront directly for a branded shopping experience.
                   </p>
 
@@ -1166,7 +1285,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                     <>
                       <div className="mb-6">
                         <label className="mb-2 block text-base font-bold text-black">
-                          Shop URL Slug
+                          Stall URL Slug
                         </label>
                         <div className="flex gap-3">
                           <div className="flex-1">
@@ -1194,7 +1313,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                               }}
                               startContent={
                                 <span className="text-sm text-gray-400">
-                                  milk.market/shop/
+                                  milk.market/stall/
                                 </span>
                               }
                             />
@@ -1202,7 +1321,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                         </div>
                         {slugStatus === "saved" && (
                           <p className="mt-1 text-sm text-green-600">
-                            Shop URL saved!
+                            Stall URL saved!
                           </p>
                         )}
                         {slugStatus === "error" && (
@@ -1221,6 +1340,10 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                             .milk.market
                           </p>
                         )}
+                      </div>
+
+                      <div className="mb-6">
+                        <CustomDomainSection />
                       </div>
 
                       <div className="mb-6">
@@ -1377,7 +1500,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                             {
                               key: "text" as const,
                               label: "Text",
-                              hint: "Shop name, links, and icons",
+                              hint: "Stall name, links, and icons",
                             },
                             {
                               key: "accent" as const,
@@ -1853,6 +1976,23 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                       </div>
 
                       <div className="mb-6">
+                        <label className="mb-2 flex items-center gap-3 text-base font-bold text-black">
+                          <input
+                            type="checkbox"
+                            checked={neoShadows}
+                            onChange={(e) => setNeoShadows(e.target.checked)}
+                            className="h-4 w-4 rounded border-gray-300"
+                          />
+                          Neo-brutalist Card Shadows
+                        </label>
+                        <p className="ml-7 text-sm text-gray-500">
+                          Adds a hard offset shadow to bordered cards across
+                          your stall — the same look used on the main Milk
+                          Market marketplace.
+                        </p>
+                      </div>
+
+                      <div className="mb-6">
                         <PageEditor
                           pages={pages}
                           onChange={setPages}
@@ -1921,6 +2061,14 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                           in exchange for their email address. Optionally add
                           interactive question flows before the capture step.
                         </p>
+                        <p className="mb-3 ml-7 text-sm">
+                          <a
+                            href="/orders?tab=contacts"
+                            className="font-semibold text-blue-600 hover:underline"
+                          >
+                            View captured contacts →
+                          </a>
+                        </p>
 
                         {emailPopup.enabled && (
                           <div className="ml-7 space-y-4 border-t border-gray-100 pt-4">
@@ -1931,7 +2079,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                               <div className="flex items-center gap-2">
                                 <Input
                                   type="number"
-                                  min={1}
+                                  min={0}
                                   max={100}
                                   classNames={{
                                     inputWrapper:
@@ -1946,17 +2094,129 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                                       discountPercentage: Math.min(
                                         100,
                                         Math.max(
-                                          1,
-                                          parseInt(e.target.value) || 1
+                                          0,
+                                          parseInt(e.target.value) || 0
                                         )
                                       ),
                                     })
                                   }
                                 />
                                 <span className="text-sm font-medium text-gray-600">
-                                  % off
+                                  % off products
                                 </span>
                               </div>
+                              <p className="mt-1 text-xs text-gray-500">
+                                Set to 0 if you only want this welcome code to
+                                discount shipping.
+                              </p>
+                            </div>
+
+                            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                              <label className="flex items-center gap-3 text-sm font-semibold text-black">
+                                <input
+                                  type="checkbox"
+                                  checked={
+                                    (emailPopup.shippingDiscountType ||
+                                      "none") !== "none"
+                                  }
+                                  onChange={(e) =>
+                                    setEmailPopup({
+                                      ...emailPopup,
+                                      shippingDiscountType: e.target.checked
+                                        ? "free"
+                                        : "none",
+                                      shippingDiscountValue: e.target.checked
+                                        ? emailPopup.shippingDiscountValue || 0
+                                        : 0,
+                                    })
+                                  }
+                                  className="h-4 w-4 rounded border-gray-300"
+                                />
+                                Also discount shipping
+                              </label>
+                              {(emailPopup.shippingDiscountType || "none") !==
+                                "none" && (
+                                <div className="mt-3 ml-7 space-y-2">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <select
+                                      className="rounded border border-gray-300 bg-white px-2 py-1 text-sm text-black"
+                                      value={
+                                        emailPopup.shippingDiscountType ||
+                                        "free"
+                                      }
+                                      onChange={(e) =>
+                                        setEmailPopup({
+                                          ...emailPopup,
+                                          shippingDiscountType: e.target
+                                            .value as
+                                            | "free"
+                                            | "percent"
+                                            | "fixed",
+                                          shippingDiscountValue:
+                                            e.target.value === "free"
+                                              ? 0
+                                              : emailPopup.shippingDiscountValue ||
+                                                0,
+                                        })
+                                      }
+                                    >
+                                      <option value="free">
+                                        Free shipping
+                                      </option>
+                                      <option value="percent">
+                                        % off shipping
+                                      </option>
+                                      <option value="fixed">
+                                        Flat amount off shipping
+                                      </option>
+                                    </select>
+                                    {emailPopup.shippingDiscountType !==
+                                      "free" && (
+                                      <>
+                                        <Input
+                                          type="number"
+                                          min={0}
+                                          max={
+                                            emailPopup.shippingDiscountType ===
+                                            "percent"
+                                              ? 100
+                                              : undefined
+                                          }
+                                          step={
+                                            emailPopup.shippingDiscountType ===
+                                            "fixed"
+                                              ? 0.01
+                                              : 1
+                                          }
+                                          classNames={{
+                                            inputWrapper:
+                                              "border-3 border-black rounded-lg bg-white shadow-none w-28",
+                                            input: "text-base !text-black",
+                                          }}
+                                          variant="bordered"
+                                          value={String(
+                                            emailPopup.shippingDiscountValue ||
+                                              ""
+                                          )}
+                                          onChange={(e) =>
+                                            setEmailPopup({
+                                              ...emailPopup,
+                                              shippingDiscountValue:
+                                                parseFloat(e.target.value) || 0,
+                                            })
+                                          }
+                                        />
+                                        <span className="text-sm text-gray-600">
+                                          {emailPopup.shippingDiscountType ===
+                                          "percent"
+                                            ? "% off shipping"
+                                            : "off shipping (in buyer's cart currency)"}
+                                        </span>
+                                      </>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
                             </div>
 
                             <div>
@@ -2364,6 +2624,10 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                                       Upload
                                     </FileUploaderButton>
                                   </div>
+                                  <p className="mt-1 text-[11px] text-gray-500">
+                                    Recommended: 800 × 600 px (4:3 popup
+                                    background)
+                                  </p>
                                   {emailPopup.style?.backgroundImage && (
                                     <div className="mt-2 flex items-center gap-2">
                                       <img
@@ -2706,45 +2970,61 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                           landing page style above is used instead.
                         </p>
                         <div className="space-y-2">
-                          {sections.map((section, idx) => (
-                            <SectionEditor
-                              key={section.id}
-                              section={section}
-                              onChange={(updated) => {
-                                const newSections = [...sections];
-                                newSections[idx] = updated;
-                                setSections(newSections);
-                              }}
-                              onRemove={() =>
-                                setSections(
-                                  sections.filter((_, i) => i !== idx)
-                                )
-                              }
-                              onMoveUp={() => {
-                                if (idx === 0) return;
-                                const newSections = [...sections];
-                                [newSections[idx - 1], newSections[idx]] = [
-                                  newSections[idx]!,
-                                  newSections[idx - 1]!,
-                                ];
-                                setSections(newSections);
-                              }}
-                              onMoveDown={() => {
-                                if (idx === sections.length - 1) return;
-                                const newSections = [...sections];
-                                [newSections[idx], newSections[idx + 1]] = [
-                                  newSections[idx + 1]!,
-                                  newSections[idx]!,
-                                ];
-                                setSections(newSections);
-                              }}
-                              isFirst={idx === 0}
-                              isLast={idx === sections.length - 1}
-                              sellerProducts={sellerProducts}
-                              isNew={newSectionId === section.id}
-                              onFlashDone={() => setNewSectionId(null)}
-                            />
-                          ))}
+                          {sections.map((section, idx) => {
+                            const drag = sectionsDnd.getItemProps(idx);
+                            return (
+                              <div
+                                key={section.id}
+                                {...drag.rootProps}
+                                className={`transition-all ${
+                                  drag.isDragging ? "opacity-40" : ""
+                                } ${
+                                  drag.isDragOver
+                                    ? "rounded-lg ring-2 ring-blue-400 ring-offset-1"
+                                    : ""
+                                }`}
+                              >
+                                <SectionEditor
+                                  section={section}
+                                  onChange={(updated) => {
+                                    const newSections = [...sections];
+                                    newSections[idx] = updated;
+                                    setSections(newSections);
+                                  }}
+                                  onRemove={() =>
+                                    setSections(
+                                      sections.filter((_, i) => i !== idx)
+                                    )
+                                  }
+                                  onMoveUp={() => {
+                                    if (idx === 0) return;
+                                    const newSections = [...sections];
+                                    [newSections[idx - 1], newSections[idx]] = [
+                                      newSections[idx]!,
+                                      newSections[idx - 1]!,
+                                    ];
+                                    setSections(newSections);
+                                  }}
+                                  onMoveDown={() => {
+                                    if (idx === sections.length - 1) return;
+                                    const newSections = [...sections];
+                                    [newSections[idx], newSections[idx + 1]] = [
+                                      newSections[idx + 1]!,
+                                      newSections[idx]!,
+                                    ];
+                                    setSections(newSections);
+                                  }}
+                                  isFirst={idx === 0}
+                                  isLast={idx === sections.length - 1}
+                                  sellerProducts={sellerProducts}
+                                  isNew={newSectionId === section.id}
+                                  onFlashDone={() => setNewSectionId(null)}
+                                  dragHandleProps={drag.handleProps}
+                                  focusToken={sectionFocusTokens[section.id]}
+                                />
+                              </div>
+                            );
+                          })}
                         </div>
                         <div className="mt-3">
                           <p className="mb-2 text-xs font-semibold tracking-wider text-gray-400 uppercase">
@@ -2825,6 +3105,12 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                                   icon: "💬",
                                   desc: "Show customer reviews from Nostr",
                                 },
+                                {
+                                  type: "social_posts" as StorefrontSectionType,
+                                  label: "Social Posts",
+                                  icon: "📱",
+                                  desc: "Link out to posts from X, Instagram, Nostr, etc.",
+                                },
                               ] as const
                             ).map((st) => (
                               <button
@@ -2880,33 +3166,16 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                         />
                       </div>
 
-                      <div className="mb-6">
-                        <label className="mb-2 block text-base font-bold text-black">
-                          Custom Domain
-                        </label>
-                        <p className="mb-2 text-sm text-gray-500">
-                          Want to use your own domain (e.g.,
-                          shop.yourdomain.com) for your storefront? We can help
-                          set that up for you.
-                        </p>
-                        <a
-                          href="mailto:support@milk.market?subject=Custom%20Domain%20Request&body=Hi%2C%20I%27d%20like%20to%20set%20up%20a%20custom%20domain%20for%20my%20storefront.%0A%0AShop%20URL%3A%20milk.market%2Fshop%2F%0ADomain%3A%20"
-                          className="inline-block rounded-lg border-3 border-black bg-white px-4 py-2 text-sm font-bold text-black hover:bg-gray-100"
-                        >
-                          Contact Us
-                        </a>
-                      </div>
-
-                      <div className="hidden rounded-lg border-2 border-dashed border-gray-300 bg-gray-50 p-4 xl:block">
+                      <div className="hidden rounded-lg border-2 border-dashed border-gray-300 bg-gray-50 p-4 lg:block">
                         <div className="flex items-center gap-3">
                           {shopSlug && (
                             <a
-                              href={`/shop/${shopSlug}`}
+                              href={`/stall/${shopSlug}`}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="text-primary-blue text-sm font-bold underline"
                             >
-                              Open live storefront (/shop/{shopSlug})
+                              Open live storefront (/stall/{shopSlug})
                             </a>
                           )}
                           <button
@@ -2923,7 +3192,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                 </div>
 
                 {storefrontAuthenticated && (
-                  <div className="sticky top-4 hidden h-[calc(100vh-6rem)] xl:block xl:w-[55%]">
+                  <div className="sticky top-4 hidden h-[calc(100vh-6rem)] lg:block lg:w-[55%]">
                     <div className="h-full overflow-hidden rounded-lg border-2 border-gray-200">
                       <StorefrontPreviewPanel
                         shopName={watch("name")}
@@ -2939,6 +3208,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                         customFontHeadingName={customFontHeadingName}
                         customFontBodyUrl={customFontBodyUrl}
                         customFontBodyName={customFontBodyName}
+                        neoShadows={neoShadows}
                         sections={sections}
                         pages={pages}
                         footer={footer}
@@ -2959,6 +3229,8 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                         }
                         shopSlug={shopSlug}
                         compact
+                        realProducts={sellerProducts}
+                        onSectionClick={handlePreviewSectionClick}
                       />
                     </div>
                   </div>
@@ -2970,7 +3242,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
               <button
                 type="button"
                 onClick={() => setIsMobilePreviewOpen(true)}
-                className="fixed right-6 bottom-6 z-50 flex items-center gap-2 rounded-full border-3 border-black bg-black px-5 py-3 font-bold text-white shadow-lg transition-transform hover:scale-105 xl:hidden"
+                className="fixed right-6 bottom-6 z-50 flex items-center gap-2 rounded-full border-3 border-black bg-black px-5 py-3 font-bold text-white shadow-lg transition-transform hover:scale-105 lg:hidden"
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
@@ -2991,13 +3263,13 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                     d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"
                   />
                 </svg>
-                Preview Shop
+                Preview Stall
               </button>
             )}
 
             {(isMobilePreviewOpen || isMobilePreviewClosing) && (
               <div
-                className="fixed inset-0 z-[9998] flex flex-col bg-white xl:hidden"
+                className="fixed inset-0 z-[9998] flex flex-col bg-white lg:hidden"
                 style={{
                   animation: isMobilePreviewClosing
                     ? "slideOutDown 0.3s ease-in forwards"
@@ -3012,7 +3284,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
               >
                 <div className="flex items-center justify-between border-b-2 border-black bg-white px-4 py-3">
                   <h3 className="text-base font-bold text-black">
-                    Storefront Preview
+                    Stall Preview
                   </h3>
                   <button
                     type="button"
@@ -3037,6 +3309,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                     customFontHeadingName={customFontHeadingName}
                     customFontBodyUrl={customFontBodyUrl}
                     customFontBodyName={customFontBodyName}
+                    neoShadows={neoShadows}
                     sections={sections}
                     pages={pages}
                     footer={footer}
@@ -3054,6 +3327,11 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                         : undefined
                     }
                     shopSlug={shopSlug}
+                    realProducts={sellerProducts}
+                    onSectionClick={(sectionId) => {
+                      handlePreviewSectionClick(sectionId);
+                      setIsMobilePreviewClosing(true);
+                    }}
                   />
                 </div>
                 <style>{`
@@ -3071,7 +3349,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
           </>
         )}
 
-        <div className="xl:max-w-[600px]">
+        <div className="mx-auto lg:max-w-[600px]">
           <Button
             className={`w-full text-lg ${BLUEBUTTONCLASSNAMES}`}
             type="submit"
@@ -3085,7 +3363,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
             isDisabled={isUploadingShopProfile}
             isLoading={isUploadingShopProfile}
           >
-            {isSaved ? "✅ Saved!" : "Save Shop"}
+            {isSaved ? "✅ Saved!" : "Save Stall"}
           </Button>
 
           {shopSlug && (
@@ -3102,7 +3380,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                     className="border-3 border-red-500 bg-white font-bold text-red-500 hover:bg-red-50"
                     type="button"
                   >
-                    Remove Storefront
+                    Remove Stall
                   </Button>
                 </DropdownTrigger>
                 <DropdownMenu
@@ -3121,7 +3399,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
                       color="danger"
                       onClick={handleRemoveStorefront}
                     >
-                      Yes, Remove Storefront
+                      Yes, Remove Stall
                     </DropdownItem>
                   </DropdownSection>
                 </DropdownMenu>
@@ -3533,6 +3811,37 @@ function SectionPreviewSvg({ type }: { type: string }) {
           <rect x="10" y="37" width="30" height="3" rx="1" fill="#F59E0B" />
           <rect x="10" y="42" width="55" height="2" rx="1" fill="#94A3B8" />
           <rect x="10" y="46" width="20" height="2" rx="1" fill="#334155" />
+        </svg>
+      );
+    case "social_posts":
+      return (
+        <svg
+          width={w}
+          height={h}
+          viewBox={`0 0 ${w} ${h}`}
+          fill="none"
+          className="rounded"
+        >
+          <rect width={w} height={h} rx="3" fill="#F8FAFC" />
+          <rect x="6" y="5" width="34" height="4" rx="1.5" fill="#334155" />
+          <rect x="6" y="14" width="26" height="36" rx="2" fill="#E2E8F0" />
+          <circle cx="12" cy="20" r="2.5" fill="#3B82F6" />
+          <rect x="17" y="18" width="12" height="2" rx="1" fill="#334155" />
+          <rect x="17" y="21" width="8" height="1.5" rx="1" fill="#94A3B8" />
+          <rect x="9" y="26" width="20" height="14" rx="1.5" fill="#CBD5E1" />
+          <rect x="9" y="42" width="16" height="2" rx="1" fill="#94A3B8" />
+          <rect x="37" y="14" width="26" height="36" rx="2" fill="#E2E8F0" />
+          <circle cx="43" cy="20" r="2.5" fill="#EC4899" />
+          <rect x="48" y="18" width="12" height="2" rx="1" fill="#334155" />
+          <rect x="48" y="21" width="8" height="1.5" rx="1" fill="#94A3B8" />
+          <rect x="40" y="26" width="20" height="14" rx="1.5" fill="#CBD5E1" />
+          <rect x="40" y="42" width="16" height="2" rx="1" fill="#94A3B8" />
+          <rect x="68" y="14" width="26" height="36" rx="2" fill="#E2E8F0" />
+          <circle cx="74" cy="20" r="2.5" fill="#8B5CF6" />
+          <rect x="79" y="18" width="12" height="2" rx="1" fill="#334155" />
+          <rect x="79" y="21" width="8" height="1.5" rx="1" fill="#94A3B8" />
+          <rect x="71" y="26" width="20" height="14" rx="1.5" fill="#CBD5E1" />
+          <rect x="71" y="42" width="16" height="2" rx="1" fill="#94A3B8" />
         </svg>
       );
     default:

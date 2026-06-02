@@ -3,6 +3,7 @@ import {
   PencilSquareIcon,
   ShareIcon,
   TrashIcon,
+  PaintBrushIcon,
 } from "@heroicons/react/24/outline";
 import {
   Modal,
@@ -15,6 +16,7 @@ import {
   Divider,
 } from "@heroui/react";
 import ProductForm from "./product-form";
+import CustomizeProductPageModal from "./customize-product-page-modal";
 import ImageCarousel from "./utility-components/image-carousel";
 import CompactCategories from "./utility-components/compact-categories";
 import { locationAvatar } from "./utility-components/dropdowns/location-dropdown";
@@ -24,12 +26,13 @@ import {
   DANGERBUTTONCLASSNAMES,
 } from "@/utils/STATIC-VARIABLES";
 import ConfirmActionDropdown from "./utility-components/dropdowns/confirm-action-dropdown";
+import { copyToClipboard } from "@/utils/clipboard";
 import SuccessModal from "./utility-components/success-modal";
 import { SignerContext } from "@/components/utility-components/nostr-context-provider";
 import parseTags, {
   ProductData,
 } from "@/utils/parsers/product-parser-functions";
-import { ProductContext } from "@/utils/context/context";
+import { ProductContext, ShopMapContext } from "@/utils/context/context";
 import { getListingSlug } from "@/utils/url-slugs";
 import { NostrEvent } from "@/utils/types/types";
 
@@ -48,10 +51,21 @@ export default function DisplayProductModal({
 }: ProductModalProps) {
   const { pubkey: userPubkey, isLoggedIn } = useContext(SignerContext);
   const productEventContext = useContext(ProductContext);
+  const shopMapContext = useContext(ShopMapContext);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [showProductForm, setShowProductForm] = useState(false);
+  const [showCustomizePageModal, setShowCustomizePageModal] = useState(false);
 
   const [showSuccessModal, setShowSuccessModal] = useState(false);
+
+  const rawEvent = productEventContext.productEvents.find(
+    (e: NostrEvent) => e.id === productData.id
+  );
+
+  const sellerProducts = productEventContext.productEvents
+    .filter((e: NostrEvent) => e.kind !== 1 && e.pubkey === productData.pubkey)
+    .map((e: NostrEvent) => parseTags(e))
+    .filter((p): p is ProductData => !!p);
 
   const isExpired = productData.expiration
     ? Date.now() / 1000 > productData.expiration
@@ -73,16 +87,20 @@ export default function DisplayProductModal({
 
     const slug = getListingSlug(productData, allParsed);
     const listingPath = slug || productData.id;
+    const sellerShop = shopMapContext.shopData.get(productData.pubkey);
+    const sellerShopSlug = sellerShop?.content?.storefront?.shopSlug;
+    const sharePath = sellerShopSlug
+      ? `/stall/${sellerShopSlug}/listing/${listingPath}`
+      : `/listing/${listingPath}`;
+    const shareUrl = `${window.location.origin}${sharePath}`;
     const shareData = {
       title: productData.title,
-      url: `${window.location.origin}/listing/${listingPath}`,
+      url: shareUrl,
     };
     if (navigator.share) {
       await navigator.share(shareData);
     } else {
-      navigator.clipboard.writeText(
-        `${window.location.origin}/listing/${listingPath}`
-      );
+      await copyToClipboard(shareUrl);
       setShowSuccessModal(true);
     }
   };
@@ -347,6 +365,19 @@ export default function DisplayProductModal({
                   >
                     Edit Listing
                   </Button>
+                  {rawEvent && (
+                    <Button
+                      type="button"
+                      className={WHITEBUTTONCLASSNAMES}
+                      startContent={
+                        <PaintBrushIcon className="hover:text-primary-yellow h-6 w-6" />
+                      }
+                      onClick={() => setShowCustomizePageModal(true)}
+                      isDisabled={deleteLoading}
+                    >
+                      Customize Page
+                    </Button>
+                  )}
                   <ConfirmActionDropdown
                     helpText="Are you sure you want to delete this listing?"
                     buttonLabel="Delete Listing"
@@ -385,6 +416,15 @@ export default function DisplayProductModal({
         isOpen={showSuccessModal}
         onClose={() => setShowSuccessModal(false)}
       />
+      {rawEvent && userPubkey === productData.pubkey && (
+        <CustomizeProductPageModal
+          isOpen={showCustomizePageModal}
+          onClose={() => setShowCustomizePageModal(false)}
+          productData={productData}
+          rawEvent={rawEvent}
+          sellerProducts={sellerProducts}
+        />
+      )}
     </>
   );
 }

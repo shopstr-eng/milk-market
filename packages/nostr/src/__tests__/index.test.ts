@@ -254,9 +254,9 @@ describe("seller nostr helpers", () => {
       },
     });
 
-    expect(
-      firstEvent.tags.find((tag) => tag[0] === "d")?.[1]
-    ).not.toEqual(secondEvent.tags.find((tag) => tag[0] === "d")?.[1]);
+    expect(firstEvent.tags.find((tag) => tag[0] === "d")?.[1]).not.toEqual(
+      secondEvent.tags.find((tag) => tag[0] === "d")?.[1]
+    );
     expect(fetchSpy).toHaveBeenCalledTimes(6);
     expect(publishSpy).toHaveBeenCalledTimes(6);
   });

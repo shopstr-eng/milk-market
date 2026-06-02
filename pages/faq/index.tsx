@@ -29,7 +29,7 @@ export default function Faq() {
         {
           title: "What payment methods are accepted?",
           content:
-            "Milk Market supports Bitcoin payments through the Lightning Network, Cashu, and Nostr Wallet Connect, as well as credit and debit card payments via Stripe and other fiat options such as Cash App, Venmo, and PayPal. Buyers and sellers can also arrange cash payments directly during pickup or delivery.",
+            "Milk Market supports Bitcoin payments through the Lightning Network, Cashu, and Nostr Wallet Connect, as well as credit and debit card payments via Stripe and other fiat options such as Cash App, Venmo, and PayPal. Shoppers and sellers can also arrange cash payments directly during pickup or delivery.",
         },
         {
           title: "How do I claim a Cashu payment?",
@@ -64,7 +64,7 @@ export default function Faq() {
         {
           title: "How does shipping work?",
           content:
-            "Sellers can offer different shipping options including free shipping, local pickup, or an added shipping cost. The shipping method and any restrictions should be clearly specified in each listing and fulfillment will be handled by the merchant themselves.",
+            "Vendors can offer different shipping options including free shipping, local pickup, or an added shipping cost. The shipping method and any restrictions should be clearly specified in each listing and fulfillment will be handled by the merchant themselves.",
         },
       ],
     },
@@ -74,7 +74,7 @@ export default function Faq() {
         {
           title: "What are Communities?",
           content:
-            "Communities are public forums hosted by sellers to interact directly with their customers. Sellers can post announcements, updates, and news about their products, and any user can reply to these announcements to ask questions or give feedback.",
+            "Communities are public forums hosted by sellers to interact directly with their customers. Vendors can post announcements, updates, and news about their products, and any user can reply to these announcements to ask questions or give feedback.",
         },
         {
           title: "Who can post in a community?",
@@ -167,10 +167,8 @@ export default function Faq() {
           name="description"
           content="Get answers to common questions about Milk Market, the permissionless marketplace for raw dairy products. Learn about payments, selling, account setup, and privacy features."
         />
-        <link rel="canonical" href="https://milk.market/faq" />
         <link rel="apple-touch-icon" href="/milk-market.png" />
         <link rel="apple-touch-icon" sizes="180x180" href="/milk-market.png" />
-        <meta property="og:url" content="https://milk.market/faq" />
         <meta property="og:type" content="website" />
         <meta
           property="og:title"
@@ -181,9 +179,6 @@ export default function Faq() {
           content="Get answers to common questions about Milk Market, the permissionless marketplace for raw dairy products. Learn about payments, selling, account setup, and privacy features."
         />
         <meta property="og:image" content="/milk-market.png" />
-        <meta name="twitter:card" content="summary_large_image" />
-        <meta property="twitter:domain" content="https://milk.market" />
-        <meta property="twitter:url" content="https://milk.market/faq" />
         <meta
           name="twitter:title"
           content="FAQ - Milk Market | Frequently Asked Questions"

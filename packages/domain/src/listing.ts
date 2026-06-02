@@ -51,7 +51,11 @@ export interface NormalizedSellerListingDraft {
   status: SellerListingStatus;
 }
 
-const RESERVED_MARKETPLACE_TAGS = new Set(["MilkMarket", "FREEMILK", "SAVEBEEF"]);
+const RESERVED_MARKETPLACE_TAGS = new Set([
+  "MilkMarket",
+  "FREEMILK",
+  "SAVEBEEF",
+]);
 const PICKUP_SHIPPING_OPTIONS = new Set<ShippingOptionsType>([
   "Pickup",
   "Free/Pickup",
@@ -77,9 +81,7 @@ function normalizeCommaSeparatedValues(values: string | string[]): string[] {
 
   return Array.from(
     new Set(
-      input
-        .map((value) => value.trim())
-        .filter((value) => value.length > 0)
+      input.map((value) => value.trim()).filter((value) => value.length > 0)
     )
   );
 }
@@ -194,7 +196,8 @@ export function validateSellerListingDraft(
   if (!normalized.description) {
     errors.description = "Listing description is required.";
   } else if (normalized.description.length > 1000) {
-    errors.description = "Listing description must be 1000 characters or fewer.";
+    errors.description =
+      "Listing description must be 1000 characters or fewer.";
   }
 
   if (normalized.images.length === 0) {
@@ -227,12 +230,19 @@ export function validateSellerListingDraft(
     }
   }
 
-  if (isPickupShippingOption(draft.shippingType) && normalized.pickupLocations.length === 0) {
+  if (
+    isPickupShippingOption(draft.shippingType) &&
+    normalized.pickupLocations.length === 0
+  ) {
     errors.pickupLocations = "Add at least one pickup location.";
   }
 
   if (draft.quantity.trim()) {
-    if (quantityInput === null || quantityInput < 0 || !Number.isInteger(quantityInput)) {
+    if (
+      quantityInput === null ||
+      quantityInput < 0 ||
+      !Number.isInteger(quantityInput)
+    ) {
       errors.quantity = "Quantity must be a whole number.";
     }
   }
@@ -264,9 +274,8 @@ export function createSellerListingDraftFromEvent(
   const shippingCost =
     shippingTag && typeof shippingTag[2] === "string" ? shippingTag[2] : "";
   const quantity = getTagValues(event, "quantity")[0] ?? "";
-  const status = getTagValues(event, "status")[0] === "inactive"
-    ? "inactive"
-    : "active";
+  const status =
+    getTagValues(event, "status")[0] === "inactive" ? "inactive" : "active";
 
   return {
     eventId: event.id,
@@ -276,14 +285,8 @@ export function createSellerListingDraftFromEvent(
       getTagValues(event, "summary")[0] ??
       (typeof event.content === "string" ? event.content : ""),
     images: getTagValues(event, "image"),
-    price:
-      priceTag && typeof priceTag[1] === "string"
-        ? priceTag[1]
-        : "",
-    currency:
-      priceTag && typeof priceTag[2] === "string"
-        ? priceTag[2]
-        : "USD",
+    price: priceTag && typeof priceTag[1] === "string" ? priceTag[1] : "",
+    currency: priceTag && typeof priceTag[2] === "string" ? priceTag[2] : "USD",
     categories,
     location: getTagValues(event, "location")[0] ?? "",
     shippingType,
@@ -334,7 +337,9 @@ export function buildSellerListingTags(params: {
   tags.push(["t", "MilkMarket"]);
   tags.push(["t", "FREEMILK"]);
 
-  if (normalized.categories.some((category) => category.toLowerCase() === "beef")) {
+  if (
+    normalized.categories.some((category) => category.toLowerCase() === "beef")
+  ) {
     tags.push(["t", "SAVEBEEF"]);
   }
 

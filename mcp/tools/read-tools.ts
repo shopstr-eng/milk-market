@@ -15,6 +15,7 @@ import {
 } from "@/utils/parsers/product-tag-helpers";
 import { NostrEvent } from "@/utils/types/types";
 import { registerTool } from "./register-tool";
+import { ToolContext } from "../audit-log";
 
 function getTagValue(tags: string[][], key: string): string | undefined {
   const tag = tags.find((t) => t[0] === key);
@@ -173,7 +174,7 @@ function parseProfileEvent(event: NostrEvent) {
     if (content.storefront) {
       base.storefront = content.storefront;
       if (content.storefront.shopSlug)
-        base.storefrontUrl = `/shop/${content.storefront.shopSlug}`;
+        base.storefrontUrl = `/stall/${content.storefront.shopSlug}`;
     }
   }
 
@@ -242,9 +243,15 @@ async function attachRepliesToReviews(
   }));
 }
 
-export function registerReadTools(server: McpServer) {
-  registerTool(
-    server,
+export function registerReadTools(server: McpServer, context?: ToolContext) {
+  const reg = (
+    name: string,
+    description: string,
+    inputSchema: any,
+    cb: (args: any, extra: any) => any
+  ) => registerTool(server, name, description, inputSchema, cb, context);
+
+  reg(
     "search_products",
     "Search and filter products by category, location, price range, or keyword",
     {
@@ -353,8 +360,7 @@ export function registerReadTools(server: McpServer) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "get_product_details",
     "Get full details for a specific product by its event ID",
     {
@@ -410,8 +416,7 @@ export function registerReadTools(server: McpServer) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "list_companies",
     "List all seller/shop profiles",
     {
@@ -461,8 +466,7 @@ export function registerReadTools(server: McpServer) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "get_company_details",
     "Get a specific company's shop profile, their products, and reviews",
     {
@@ -605,7 +609,7 @@ export function registerReadTools(server: McpServer) {
         .string()
         .optional()
         .describe(
-          "Shop URL slug (e.g. 'fresh-farm' for milk.market/shop/fresh-farm)"
+          "Shop URL slug (e.g. 'fresh-farm' for milk.market/stall/fresh-farm)"
         ),
       pubkey: z
         .string()
@@ -751,7 +755,7 @@ export function registerReadTools(server: McpServer) {
                   storefront: {
                     ...storefront,
                     storefrontUrl: storefront.shopSlug
-                      ? `/shop/${storefront.shopSlug}`
+                      ? `/stall/${storefront.shopSlug}`
                       : null,
                     customDomain,
                   },

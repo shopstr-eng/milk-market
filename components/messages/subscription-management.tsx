@@ -30,6 +30,12 @@ import {
   sendGiftWrappedMessageEvent,
   generateKeys,
 } from "@/utils/nostr/nostr-helper-functions";
+import {
+  buildCancelSubscriptionProof,
+  buildSignedHttpRequestProofTemplate,
+  buildUpdateSubscriptionProof,
+  SIGNED_EVENT_HEADER,
+} from "@/utils/nostr/request-auth";
 
 interface SubscriptionData {
   id: number;
@@ -63,7 +69,11 @@ const FREQUENCY_LABELS: Record<string, string> = {
   quarterly: "Quarterly",
 };
 
-const SubscriptionManagement = () => {
+const SubscriptionManagement = ({
+  filterBySellerPubkey,
+}: {
+  filterBySellerPubkey?: string;
+} = {}) => {
   const [subscriptions, setSubscriptions] = useState<SubscriptionData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [guestEmail, setGuestEmail] = useState("");
@@ -180,11 +190,26 @@ const SubscriptionManagement = () => {
     if (!cancelSubscription) return;
     setIsCanceling(true);
     try {
+      if (!signer || !userPubkey) {
+        throw new Error("Sign in with Nostr to manage this subscription");
+      }
+      const subscriptionId = cancelSubscription.stripe_subscription_id;
+      const signedEvent = await signer.sign(
+        buildSignedHttpRequestProofTemplate(
+          buildCancelSubscriptionProof({
+            pubkey: userPubkey,
+            subscriptionId,
+          })
+        )
+      );
       const response = await fetch("/api/stripe/cancel-subscription", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+        },
         body: JSON.stringify({
-          subscriptionId: cancelSubscription.stripe_subscription_id,
+          subscriptionId,
         }),
       });
       if (response.ok) {
@@ -206,6 +231,7 @@ const SubscriptionManagement = () => {
             endDate:
               cancelSubscription.next_billing_date || new Date().toISOString(),
             subscriptionId: cancelSubscription.stripe_subscription_id,
+            sellerPubkey: cancelSubscription.seller_pubkey || undefined,
           }),
         }).catch(() => {});
       }
@@ -228,11 +254,26 @@ const SubscriptionManagement = () => {
     if (!dateSubscription || !data.newDate) return;
     setIsUpdatingDate(true);
     try {
+      if (!signer || !userPubkey) {
+        throw new Error("Sign in with Nostr to manage this subscription");
+      }
+      const subscriptionId = dateSubscription.stripe_subscription_id;
+      const signedEvent = await signer.sign(
+        buildSignedHttpRequestProofTemplate(
+          buildUpdateSubscriptionProof({
+            pubkey: userPubkey,
+            subscriptionId,
+          })
+        )
+      );
       const response = await fetch("/api/stripe/update-subscription", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+        },
         body: JSON.stringify({
-          subscriptionId: dateSubscription.stripe_subscription_id,
+          subscriptionId,
           nextBillingDate: data.newDate,
         }),
       });
@@ -267,11 +308,26 @@ const SubscriptionManagement = () => {
     if (!addressSubscription || !newAddress) return;
     setIsUpdatingAddress(true);
     try {
+      if (!signer || !userPubkey) {
+        throw new Error("Sign in with Nostr to manage this subscription");
+      }
+      const subscriptionId = addressSubscription.stripe_subscription_id;
+      const signedEvent = await signer.sign(
+        buildSignedHttpRequestProofTemplate(
+          buildUpdateSubscriptionProof({
+            pubkey: userPubkey,
+            subscriptionId,
+          })
+        )
+      );
       const response = await fetch("/api/stripe/update-subscription", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+        },
         body: JSON.stringify({
-          subscriptionId: addressSubscription.stripe_subscription_id,
+          subscriptionId,
           shippingAddress: { address: newAddress },
         }),
       });
@@ -351,6 +407,7 @@ const SubscriptionManagement = () => {
               addressSubscription.product_event_id,
             newAddress: newAddress,
             subscriptionId: addressSubscription.stripe_subscription_id,
+            sellerPubkey: addressSubscription.seller_pubkey || undefined,
           }),
         }).catch(() => {});
       }
@@ -445,10 +502,13 @@ const SubscriptionManagement = () => {
     );
   }
 
-  const activeSubscriptions = subscriptions.filter(
+  const scopedSubscriptions = filterBySellerPubkey
+    ? subscriptions.filter((s) => s.seller_pubkey === filterBySellerPubkey)
+    : subscriptions;
+  const activeSubscriptions = scopedSubscriptions.filter(
     (s) => s.status === "active"
   );
-  const inactiveSubscriptions = subscriptions.filter(
+  const inactiveSubscriptions = scopedSubscriptions.filter(
     (s) => s.status !== "active"
   );
 
@@ -503,7 +563,7 @@ const SubscriptionManagement = () => {
 
                         <div className="mb-2">
                           <span className="text-sm font-medium text-gray-600">
-                            Seller:
+                            Vendor:
                           </span>
                           <div className="mt-1">
                             {sub.seller_pubkey ? (
@@ -626,7 +686,7 @@ const SubscriptionManagement = () => {
                             Subscription ID
                           </th>
                           <th className="px-4 py-3 text-left text-xs font-bold tracking-wider text-black uppercase">
-                            Seller
+                            Vendor
                           </th>
                           <th className="px-4 py-3 text-left text-xs font-bold tracking-wider text-black uppercase">
                             Frequency

@@ -79,6 +79,7 @@ export default function ProductForm({
   const router = useRouter();
   const [images, setImages] = useState<string[]>([]);
   const [imageError, setImageError] = useState<string | null>(null);
+  const [validationError, setValidationError] = useState<string | null>(null);
   const [currentSlide, setCurrentSlide] = useState(0);
   const [pubkey, setPubkey] = useState("");
   const [relayHint, setRelayHint] = useState("");
@@ -119,7 +120,10 @@ export default function ProductForm({
           Currency: oldValues.currency,
           Location: oldValues.location,
           "Shipping Option": oldValues.shippingType,
-          "Shipping Cost": oldValues.shippingCost,
+          "Shipping Cost":
+            oldValues.shippingCost !== undefined
+              ? String(oldValues.shippingCost)
+              : "",
           "Pickup Locations": oldValues.pickupLocations || [""],
           Category: oldValues.categories ? oldValues.categories.join(",") : "",
           Quantity: oldValues.quantity ? String(oldValues.quantity) : "",
@@ -256,6 +260,7 @@ export default function ProductForm({
   const onSubmit = async (data: {
     [x: string]: string | Map<string, number> | string[];
   }) => {
+    setValidationError(null);
     if (images.length === 0) {
       setImageError("At least one image is required.");
       return;
@@ -264,6 +269,41 @@ export default function ProductForm({
     }
 
     setIsPostingOrUpdatingProduct(true);
+    try {
+      await runSubmit(data);
+    } catch (error) {
+      console.error("Failed to publish listing:", error);
+      setImageError(
+        error instanceof Error
+          ? `Failed to publish listing: ${error.message}`
+          : "Failed to publish listing. Please try again."
+      );
+    } finally {
+      setIsPostingOrUpdatingProduct(false);
+    }
+  };
+
+  // Surface validation failures so the user isn't left staring at a stuck
+  // form when react-hook-form silently focuses the first invalid field.
+  const onInvalid = (errors: Record<string, { message?: string }>) => {
+    const fields = Object.keys(errors);
+    const first = fields[0];
+    const firstMessage = first ? errors[first]?.message : undefined;
+    setValidationError(
+      firstMessage
+        ? `${firstMessage}${fields.length > 1 ? ` (and ${fields.length - 1} more field${fields.length - 1 === 1 ? "" : "s"} need attention)` : ""}`
+        : `Please fix the highlighted field${fields.length === 1 ? "" : "s"} before publishing.`
+    );
+    if (images.length === 0) {
+      setImageError("At least one image is required.");
+    }
+  };
+
+  const submitForm = handleSubmit(onSubmit as any, onInvalid as any);
+
+  const runSubmit = async (data: {
+    [x: string]: string | Map<string, number> | string[];
+  }) => {
     const hashHex = CryptoJS.SHA256(data["Product Name"] as string).toString(
       CryptoJS.enc.Hex
     );
@@ -275,7 +315,7 @@ export default function ProductForm({
         "client",
         "Milk Market",
         "31990:" + pubkey + ":" + (oldValues?.d || hashHex),
-        relayHint,
+        relayHint || "",
       ],
       ["title", data["Product Name"] as string],
       ["summary", data["Description"] as string],
@@ -283,9 +323,13 @@ export default function ProductForm({
       ["location", data["Location"] as string],
       [
         "shipping",
-        data["Shipping Option"] as string,
-        data["Shipping Cost"] ? (data["Shipping Cost"] as string) : "0",
-        data["Currency"] as string,
+        String(data["Shipping Option"] ?? ""),
+        data["Shipping Cost"] !== undefined &&
+        data["Shipping Cost"] !== null &&
+        data["Shipping Cost"] !== ""
+          ? String(data["Shipping Cost"])
+          : "0",
+        String(data["Currency"] ?? ""),
       ],
     ];
 
@@ -444,77 +488,92 @@ export default function ProductForm({
         });
     }
 
-    const newListing = await PostListing(tags, signer!, isLoggedIn!, nostr!);
-
-    //Handle Flash Sale (Zapsnag) Publication
-    if (isFlashSale) {
-      try {
-        const finalContent = `${data["Description"]}\n\nPrice: ${
-          data["Price"]
-        } ${data["Currency"]}\n\n#zapsnag\n${images[0] || ""}`;
-        const flashSaleEvent = {
-          kind: 1,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [
-            ["t", "zapsnag"],
-            ["t", "milk-market-zapsnag"],
-            ["d", "zapsnag"],
-          ],
-          content: finalContent,
-        };
-
-        if (data["Quantity"]) {
-          flashSaleEvent.tags.push(["quantity", data["Quantity"].toString()]);
-        }
-        if (images[0]) flashSaleEvent.tags.push(["image", images[0]]);
-        await finalizeAndSendNostrEvent(signer!, nostr!, flashSaleEvent);
-      } catch (e) {
-        console.error("Failed to publish flash sale note", e);
-      }
+    if (oldValues?.pageConfig) {
+      tags.push(["page_config", JSON.stringify(oldValues.pageConfig)]);
     }
 
-    if (isEdit) {
-      if (handleDelete && oldValues?.id) {
-        try {
-          await handleDelete(oldValues.id);
-        } catch (error) {
-          console.error("Failed to delete old product:", error);
-        }
+    const newListing = await PostListing(tags, signer!, isLoggedIn!, nostr!);
+
+    //Handle Flash Sale (Zapsnag) Publication — non-blocking; the primary
+    //listing has already been published, so don't keep the spinner up
+    //while we broadcast the optional kind-1 announcement.
+    if (isFlashSale) {
+      const finalContent = `${data["Description"]}\n\nPrice: ${
+        data["Price"]
+      } ${data["Currency"]}\n\n#zapsnag\n${images[0] || ""}`;
+      const flashSaleEvent = {
+        kind: 1,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ["t", "zapsnag"],
+          ["t", "milk-market-zapsnag"],
+          ["d", "zapsnag"],
+        ],
+        content: finalContent,
+      };
+
+      if (data["Quantity"]) {
+        flashSaleEvent.tags.push(["quantity", data["Quantity"].toString()]);
       }
+      if (images[0]) flashSaleEvent.tags.push(["image", images[0]]);
+      void finalizeAndSendNostrEvent(signer!, nostr!, flashSaleEvent).catch(
+        (e) => console.error("Failed to publish flash sale note", e)
+      );
+    }
+
+    if (isEdit && handleDelete && oldValues?.id) {
+      // Don't block the UI on the delete-event publish — the new
+      // replaceable listing already supersedes the old one for clients
+      // that respect NIP-33, and the deletion is best-effort cleanup.
+      const oldId = oldValues.id;
+      void Promise.resolve(handleDelete(oldId)).catch((error) =>
+        console.error("Failed to delete old product:", error)
+      );
     }
 
     clear();
     productEventContext.addNewlyCreatedProductEvent(newListing);
-    setIsPostingOrUpdatingProduct(false);
     if (onSubmitCallback) {
       onSubmitCallback();
     }
 
     if (pubkey && !isEdit && signer) {
-      try {
-        const signedEvent = await signer.sign(
-          buildMcpRequestProofTemplate(buildStripeAccountStatusProof(pubkey))
-        );
-        const res = await fetch("/api/stripe/connect/account-status", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ pubkey, signedEvent }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (!data.chargesEnabled) {
-            setShowStripeConnectModal(true);
+      // Run the Stripe status check in the background — the listing is
+      // already published, and we don't want a slow Stripe API call to
+      // keep the submit spinner alive.
+      void (async () => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
+        try {
+          const signedEvent = await signer.sign(
+            buildMcpRequestProofTemplate(buildStripeAccountStatusProof(pubkey))
+          );
+          const res = await fetch("/api/stripe/connect/account-status", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pubkey, signedEvent }),
+            signal: controller.signal,
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (!data.chargesEnabled) {
+              setShowStripeConnectModal(true);
+            }
           }
+        } catch {
+          // silently fail
+        } finally {
+          clearTimeout(timeoutId);
         }
-      } catch {
-        // silently fail
-      }
+      })();
     }
   };
 
   const clear = () => {
     handleModalToggle();
     setImages([]);
+    setImageError(null);
+    setValidationError(null);
     setHerdshareAgreementUrl("");
     setSubscriptionEnabled(false);
     setSubscriptionDiscount("");
@@ -623,10 +682,9 @@ export default function ProductForm({
           </ModalHeader>
           <form
             onSubmit={(e) => {
-              if (e.target !== e.currentTarget) {
-                e.preventDefault();
-              }
-              return handleSubmit(onSubmit as any)(e);
+              e.preventDefault();
+              e.stopPropagation();
+              void submitForm(e);
             }}
           >
             <ModalBody className="bg-white px-6 py-6">
@@ -959,7 +1017,7 @@ export default function ProductForm({
                   %. You can modify this in your{" "}
                   <span
                     className="cursor-pointer underline hover:text-blue-600"
-                    onClick={() => router.push("/settings/user-profile")}
+                    onClick={() => router.push("/settings/market-profile")}
                   >
                     settings
                   </span>
@@ -1305,6 +1363,9 @@ export default function ProductForm({
                       <label className="mb-2 block text-base font-semibold text-black">
                         Volumes (optional)
                       </label>
+                      <p className="mb-1 text-xs text-gray-500">
+                        Tap a selected volume again to remove it.
+                      </p>
                       <Select
                         classNames={{
                           trigger:
@@ -1320,10 +1381,11 @@ export default function ProductForm({
                         selectionMode="multiple"
                         isInvalid={isErrored}
                         errorMessage={errorMessage}
-                        onChange={(e) => handleVolumeChange(e.target.value)}
+                        onSelectionChange={(keys) =>
+                          handleVolumeChange(Array.from(keys as Set<string>))
+                        }
                         onBlur={onBlur}
-                        value={selectedVolumes}
-                        defaultSelectedKeys={new Set(selectedVolumes)}
+                        selectedKeys={new Set(selectedVolumes)}
                       >
                         <SelectSection>
                           <SelectItem key="Half-pint">Half-pint</SelectItem>
@@ -1439,6 +1501,9 @@ export default function ProductForm({
                       <label className="mb-2 block text-base font-semibold text-black">
                         Weights (optional)
                       </label>
+                      <p className="mb-1 text-xs text-gray-500">
+                        Tap a selected weight again to remove it.
+                      </p>
                       <Select
                         classNames={{
                           trigger:
@@ -1454,10 +1519,11 @@ export default function ProductForm({
                         selectionMode="multiple"
                         isInvalid={isErrored}
                         errorMessage={errorMessage}
-                        onChange={(e) => handleWeightChange(e.target.value)}
+                        onSelectionChange={(keys) =>
+                          handleWeightChange(Array.from(keys as Set<string>))
+                        }
                         onBlur={onBlur}
-                        value={selectedWeights}
-                        defaultSelectedKeys={new Set(selectedWeights)}
+                        selectedKeys={new Set(selectedWeights)}
                       >
                         <SelectSection>
                           <SelectItem key="1oz">1oz</SelectItem>
@@ -2268,6 +2334,9 @@ export default function ProductForm({
                           <label className="mb-2 block text-base font-semibold text-black">
                             Sizes
                           </label>
+                          <p className="mb-1 text-xs text-gray-500">
+                            Tap a selected size again to remove it.
+                          </p>
                           <Select
                             classNames={{
                               trigger:
@@ -2282,10 +2351,11 @@ export default function ProductForm({
                             selectionMode="multiple"
                             isInvalid={isErrored}
                             errorMessage={errorMessage}
-                            onChange={(e) => handleSizeChange(e.target.value)}
+                            onSelectionChange={(keys) =>
+                              handleSizeChange(Array.from(keys as Set<string>))
+                            }
                             onBlur={onBlur}
-                            value={selectedSizes}
-                            defaultSelectedKeys={new Set(selectedSizes)}
+                            selectedKeys={new Set(selectedSizes)}
                           >
                             <SelectSection>
                               <SelectItem key="XS">XS</SelectItem>
@@ -2515,7 +2585,7 @@ export default function ProductForm({
                         <p className="text-tiny mt-1 text-gray-500">
                           Listing will remain visible but marked as
                           &quot;Outdated&quot; after this date. Leave empty if
-                          product has no expiration. Buyers won&apos;t be able
+                          product has no expiration. Shoppers won&apos;t be able
                           to purchase after expiration.
                         </p>
                       </div>
@@ -2538,7 +2608,7 @@ export default function ProductForm({
                   . You can modify this in your{" "}
                   <span
                     className="cursor-pointer underline hover:text-blue-600"
-                    onClick={() => router.push("/settings/user-profile")}
+                    onClick={() => router.push("/settings/market-profile")}
                   >
                     profile settings
                   </span>
@@ -2547,34 +2617,36 @@ export default function ProductForm({
               </div>
             </ModalBody>
 
+            {validationError && (
+              <div className="border-t-2 border-red-500 bg-red-50 px-6 py-3 text-sm font-semibold text-red-700">
+                {validationError}
+              </div>
+            )}
             <ModalFooter className="border-t-2 border-black bg-white px-6 py-4">
               <ConfirmActionDropdown
                 helpText={
-                  "Are you sure you want to clear this form? You will lose all current progress."
+                  "Are you sure you want to cancel? You will lose all current progress."
                 }
-                buttonLabel={"Clear Form"}
+                buttonLabel={"Cancel"}
                 onConfirm={clear}
               >
                 <Button color="danger" variant="light">
                   <span className="text-base font-semibold text-red-600">
-                    Clear
+                    Cancel
                   </span>
                 </Button>
               </ConfirmActionDropdown>
 
               <Button
                 className="rounded-md border-2 border-black bg-gray-800 px-8 py-3 text-base font-bold text-white shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] transition-all hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
-                type="submit"
-                onClick={(e) => {
-                  if (signer && isLoggedIn) {
-                    e.preventDefault();
-                    handleSubmit(onSubmit as any)();
-                  }
+                type="button"
+                onClick={() => {
+                  void submitForm();
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     e.preventDefault();
-                    handleSubmit(onSubmit as any)();
+                    void submitForm();
                   }
                 }}
                 isDisabled={isPostingOrUpdatingProduct}
@@ -2591,8 +2663,8 @@ export default function ProductForm({
           isOpen={showStripeConnectModal}
           onClose={() => setShowStripeConnectModal(false)}
           pubkey={pubkey}
-          returnPath="/my-listings?stripe=success"
-          refreshPath="/my-listings?stripe=refresh"
+          returnPath="/settings/stall?tab=products&stripe=success"
+          refreshPath="/settings/stall?tab=products&stripe=refresh"
         />
       )}
     </>

@@ -15,6 +15,7 @@ interface StorefrontShopPageProps {
   products: ProductData[];
   colors: StorefrontColorScheme;
   shopName: string;
+  shopSlug?: string;
 }
 
 const ITEMS_PER_PAGE = 24;
@@ -137,7 +138,7 @@ export default function StorefrontShopPage({
         className="font-heading mb-6 text-2xl font-bold md:text-3xl"
         style={{ color: colors.text }}
       >
-        Shop
+        Stall
       </h1>
 
       <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-center">

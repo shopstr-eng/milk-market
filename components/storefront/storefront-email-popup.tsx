@@ -6,6 +6,7 @@ import {
 } from "@/utils/types/types";
 import { XMarkIcon } from "@heroicons/react/24/outline";
 import { motion, AnimatePresence } from "framer-motion";
+import { copyToClipboard } from "@/utils/clipboard";
 
 interface StorefrontEmailPopupProps {
   config: StorefrontEmailPopup;
@@ -14,6 +15,7 @@ interface StorefrontEmailPopupProps {
   shopName: string;
   fontHeading?: string;
   fontBody?: string;
+  neoShadows?: boolean;
 }
 
 export default function StorefrontEmailPopupComponent({
@@ -23,6 +25,7 @@ export default function StorefrontEmailPopupComponent({
   shopName,
   fontHeading,
   fontBody,
+  neoShadows,
 }: StorefrontEmailPopupProps) {
   const [isVisible, setIsVisible] = useState(false);
   const [email, setEmail] = useState("");
@@ -32,6 +35,7 @@ export default function StorefrontEmailPopupComponent({
   >("idle");
   const [discountCode, setDiscountCode] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
+  const [codeCopied, setCodeCopied] = useState(false);
 
   const flowSteps = config.flowSteps || [];
   const hasFlow = flowSteps.length > 0;
@@ -122,6 +126,8 @@ export default function StorefrontEmailPopupComponent({
           email,
           phone: phone || undefined,
           discountPercentage: config.discountPercentage,
+          shippingDiscountType: config.shippingDiscountType,
+          shippingDiscountValue: config.shippingDiscountValue,
           shopName,
           flowAnswers:
             Object.keys(flowAnswers).length > 0 ? flowAnswers : undefined,
@@ -132,6 +138,12 @@ export default function StorefrontEmailPopupComponent({
       if (!res.ok) {
         setErrorMsg(data.error || "Something went wrong");
         setStatus("error");
+        // On a duplicate-contact 409, remember the dismissal so the popup
+        // stops nagging on every page load now that we've told the buyer
+        // their contact info has already been used.
+        if (res.status === 409 || data.alreadyCaptured) {
+          localStorage.setItem(`popup_dismissed_${shopPubkey}`, "1");
+        }
         return;
       }
 
@@ -144,8 +156,34 @@ export default function StorefrontEmailPopupComponent({
     }
   };
 
-  const headline =
-    config.headline || `Get ${config.discountPercentage}% Off Your First Order`;
+  // Build a short benefit label that may combine product percent + shipping
+  // discount ("15% OFF + FREE SHIPPING", "FREE SHIPPING", etc.). Used by
+  // the hero badge and the default headline so a shipping-only welcome code
+  // doesn't display "0% OFF".
+  const shipType = config.shippingDiscountType || "none";
+  const shipVal = config.shippingDiscountValue || 0;
+  const benefitParts: string[] = [];
+  if (config.discountPercentage > 0) {
+    benefitParts.push(`${config.discountPercentage}% OFF`);
+  }
+  if (shipType === "free") benefitParts.push("FREE SHIPPING");
+  else if (shipType === "percent" && shipVal > 0)
+    benefitParts.push(`${shipVal}% OFF SHIPPING`);
+  else if (shipType === "fixed" && shipVal > 0)
+    benefitParts.push(`${shipVal} OFF SHIPPING`);
+  const benefitLabel =
+    benefitParts.length > 0 ? benefitParts.join(" + ") : "DISCOUNT";
+  const headlineDefault =
+    config.discountPercentage > 0
+      ? `Get ${config.discountPercentage}% Off Your First Order`
+      : shipType === "free"
+        ? "Get Free Shipping On Your First Order"
+        : shipType === "percent" && shipVal > 0
+          ? `Get ${shipVal}% Off Shipping On Your First Order`
+          : shipType === "fixed" && shipVal > 0
+            ? `Get ${shipVal} Off Shipping On Your First Order`
+            : "Get a Discount On Your First Order";
+  const headline = config.headline || headlineDefault;
   const subtext =
     config.subtext || "Sign up to receive an exclusive discount code.";
   const buttonText = config.buttonText || "Get My Discount";
@@ -174,8 +212,17 @@ export default function StorefrontEmailPopupComponent({
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.9, opacity: 0, y: 20 }}
             transition={{ type: "spring", damping: 25, stiffness: 300 }}
-            className="relative w-full max-w-md overflow-hidden rounded-2xl shadow-2xl"
-            style={{ backgroundColor: bg, ...fontStyles }}
+            className={`relative w-full max-w-md overflow-hidden rounded-2xl ${neoShadows ? "border-2" : "shadow-2xl"}`}
+            style={{
+              backgroundColor: bg,
+              ...fontStyles,
+              ...(neoShadows
+                ? {
+                    borderColor: colors.secondary,
+                    boxShadow: `8px 8px 0 ${colors.secondary}`,
+                  }
+                : {}),
+            }}
           >
             {bgImage && (
               <div
@@ -206,7 +253,7 @@ export default function StorefrontEmailPopupComponent({
                   className="text-4xl font-bold"
                   style={{ color: btnText, ...headingFontStyles }}
                 >
-                  {config.discountPercentage}% OFF
+                  {benefitLabel}
                 </div>
               </div>
 
@@ -254,16 +301,21 @@ export default function StorefrontEmailPopupComponent({
                         </p>
                       </div>
                       <button
-                        onClick={() => {
-                          navigator.clipboard.writeText(discountCode);
+                        onClick={async () => {
+                          const ok = await copyToClipboard(discountCode);
+                          if (ok !== false) {
+                            setCodeCopied(true);
+                            setTimeout(() => setCodeCopied(false), 2000);
+                          }
                         }}
+                        aria-live="polite"
                         className="mb-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors"
                         style={{
                           backgroundColor: btnColor,
                           color: btnText,
                         }}
                       >
-                        Copy Code
+                        {codeCopied ? "✓ Copied!" : "Copy Code"}
                       </button>
                       <button
                         onClick={handleDismiss}

@@ -15,17 +15,29 @@ const UserTypeSelection = () => {
     preselect === "seller" ? "seller" : null
   );
 
+  const migrate = router.query.migrate as string | undefined;
+  const migrateSuffix = migrate
+    ? `&migrate=${encodeURIComponent(migrate)}`
+    : "";
+
   useEffect(() => {
+    if (!router.isReady) return;
+    // Sellers coming through the Shopify migration funnel already have an
+    // implicit role — skip this step entirely.
+    if (migrate === "shopify") {
+      router.replace("/onboarding/market-profile?type=seller&migrate=shopify");
+      return;
+    }
     if (preselect === "seller") {
       setSelectedType("seller");
     }
-  }, [preselect]);
+  }, [preselect, migrate, router]);
 
   const handleNext = () => {
     if (selectedType === "seller") {
-      router.push("/onboarding/user-profile?type=seller");
+      router.push(`/onboarding/market-profile?type=seller${migrateSuffix}`);
     } else if (selectedType === "buyer") {
-      router.push("/onboarding/user-profile?type=buyer");
+      router.push(`/onboarding/market-profile?type=buyer${migrateSuffix}`);
     }
   };
 
@@ -65,7 +77,7 @@ const UserTypeSelection = () => {
                 }`}
               >
                 <UserIcon className="mb-4 h-16 w-16 stroke-[2.5] text-black" />
-                <h3 className="mb-3 text-xl font-bold text-black">Buyer</h3>
+                <h3 className="mb-3 text-xl font-bold text-black">Shopper</h3>
                 <p className="text-center text-sm font-medium text-black">
                   Browse and purchase products from local sellers
                 </p>
@@ -80,7 +92,7 @@ const UserTypeSelection = () => {
                 }`}
               >
                 <ShoppingBagIcon className="mb-4 h-16 w-16 stroke-[2.5] text-black" />
-                <h3 className="mb-3 text-xl font-bold text-black">Seller</h3>
+                <h3 className="mb-3 text-xl font-bold text-black">Vendor</h3>
                 <p className="text-center text-sm font-medium text-black">
                   List and sell your products to buyers
                 </p>

@@ -102,7 +102,36 @@ export type StorefrontSectionType =
   | "text"
   | "image"
   | "contact"
-  | "reviews";
+  | "reviews"
+  | "social_posts"
+  | "product_description"
+  | "product_specifications"
+  | "product_shipping_returns"
+  | "product_gallery"
+  | "related_products";
+
+export type StorefrontSocialPostPlatform =
+  | "instagram"
+  | "x"
+  | "facebook"
+  | "youtube"
+  | "tiktok"
+  | "telegram"
+  | "website"
+  | "other";
+
+export interface StorefrontSocialPost {
+  platform: StorefrontSocialPostPlatform;
+  url: string;
+  caption?: string;
+  image?: string;
+  author?: string;
+}
+
+export interface StorefrontSpecificationItem {
+  label: string;
+  value: string;
+}
 
 export interface StorefrontSection {
   id: string;
@@ -132,6 +161,25 @@ export interface StorefrontSection {
   address?: string;
   caption?: string;
   reviewOrder?: string[];
+  specifications?: StorefrontSpecificationItem[];
+  shippingInfo?: string;
+  returnsInfo?: string;
+  galleryImages?: string[];
+  useProductImages?: boolean;
+  excludeCurrentProduct?: boolean;
+  mergeAutoSpecs?: boolean;
+  socialPosts?: StorefrontSocialPost[];
+  socialPostsLayout?: "grid" | "carousel";
+  socialPostsAutoplay?: boolean;
+  socialPostsSpeed?: number;
+}
+
+export interface StorefrontProductPageConfig {
+  sections?: StorefrontSection[];
+  themeOverrides?: Partial<StorefrontColorScheme>;
+  ogImage?: string;
+  metaTitle?: string;
+  metaDescription?: string;
 }
 
 export interface StorefrontPage {
@@ -167,6 +215,13 @@ export interface PopupStyle {
 export interface StorefrontEmailPopup {
   enabled: boolean;
   discountPercentage: number;
+  // Optional shipping discount layered on top of the product percentage.
+  // 'none' (or omitted) preserves the legacy product-only welcome code.
+  // 'free' waives shipping; 'percent' is `shippingDiscountValue` % off
+  // shipping; 'fixed' is `shippingDiscountValue` units off shipping
+  // (denominated in the buyer's cart display currency at checkout).
+  shippingDiscountType?: "none" | "free" | "percent" | "fixed";
+  shippingDiscountValue?: number;
   headline?: string;
   subtext?: string;
   collectPhone?: boolean;
@@ -200,6 +255,7 @@ export interface StorefrontConfig {
   customFontHeadingName?: string;
   customFontBodyUrl?: string;
   customFontBodyName?: string;
+  neoShadows?: boolean;
   sections?: StorefrontSection[];
   pages?: StorefrontPage[];
   footer?: StorefrontFooter;
@@ -210,4 +266,5 @@ export interface StorefrontConfig {
   navColors?: StorefrontNavColors;
   footerColors?: StorefrontFooterColors;
   seoMeta?: StorefrontSeoMeta;
+  productPageDefaults?: StorefrontSection[];
 }

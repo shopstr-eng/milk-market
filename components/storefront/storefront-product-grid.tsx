@@ -3,20 +3,26 @@ import { ProductData } from "@/utils/parsers/product-parser-functions";
 import ProductCard from "@/components/utility-components/product-card";
 import { getListingSlug } from "@/utils/url-slugs";
 import { useState } from "react";
+import FormattedText from "./formatted-text";
 import { Pagination } from "@heroui/react";
 
 interface StorefrontProductGridProps {
   products: ProductData[];
   layout: "grid" | "list" | "featured";
   colors: StorefrontColorScheme;
+  shopSlug?: string;
 }
 
 const ITEMS_PER_PAGE = 24;
+
+const buildListingHref = (slug: string, _shopSlug?: string) =>
+  `/listing/${slug}`;
 
 export default function StorefrontProductGrid({
   products,
   layout,
   colors,
+  shopSlug,
 }: StorefrontProductGridProps) {
   const [currentPage, setCurrentPage] = useState(1);
 
@@ -69,7 +75,11 @@ export default function StorefrontProductGrid({
                 {featuredProduct.title}
               </h2>
               {featuredProduct.summary && (
-                <p className="mt-3 opacity-70">{featuredProduct.summary}</p>
+                <FormattedText
+                  as="p"
+                  text={featuredProduct.summary}
+                  className="mt-3 whitespace-pre-line opacity-70"
+                />
               )}
               <div className="mt-4">
                 <span
@@ -78,14 +88,17 @@ export default function StorefrontProductGrid({
                 >
                   {featuredProduct.currency === "sat" ||
                   featuredProduct.currency === "sats"
-                    ? `${featuredProduct.totalCost} sats`
-                    : `${featuredProduct.totalCost} ${
+                    ? `${featuredProduct.price} sats`
+                    : `${featuredProduct.price} ${
                         featuredProduct.currency?.toUpperCase() || "USD"
                       }`}
                 </span>
               </div>
               <a
-                href={`/listing/${getListingSlug(featuredProduct, products)}`}
+                href={buildListingHref(
+                  getListingSlug(featuredProduct, products),
+                  shopSlug
+                )}
                 className="mt-6 inline-block rounded-lg px-6 py-3 text-center font-bold transition-transform hover:-translate-y-0.5"
                 style={{
                   backgroundColor: colors.primary,
@@ -99,23 +112,32 @@ export default function StorefrontProductGrid({
         </div>
       )}
 
-      <div
-        className={
-          layout === "list"
-            ? "flex flex-col gap-4"
-            : "grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3"
-        }
-      >
-        {remainingProducts.map((product) => {
-          const slug = getListingSlug(product, products);
-          const href = `/listing/${slug}`;
-          return (
-            <div key={product.id || product.d}>
-              <ProductCard productData={product} href={href} />
-            </div>
-          );
-        })}
-      </div>
+      {remainingProducts.length > 0 && (
+        <div
+          className={
+            layout === "list"
+              ? "mx-auto flex max-w-3xl flex-col gap-4"
+              : remainingProducts.length === 1
+                ? "mx-auto grid max-w-xs grid-cols-1 gap-6"
+                : remainingProducts.length === 2
+                  ? "mx-auto grid max-w-2xl grid-cols-1 gap-6 sm:grid-cols-2"
+                  : "grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3"
+          }
+        >
+          {remainingProducts.map((product) => {
+            const slug = getListingSlug(product, products);
+            const href = buildListingHref(slug, shopSlug);
+            return (
+              <div
+                key={product.id || product.d}
+                className="flex w-full max-w-full min-w-0 justify-center"
+              >
+                <ProductCard productData={product} href={href} />
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {totalPages > 1 && (
         <div className="mt-8 flex justify-center">

@@ -5,9 +5,9 @@ import {
   UserIcon,
   UserGroupIcon,
   ArrowRightStartOnRectangleIcon,
-  BanknotesIcon,
   KeyIcon,
   EnvelopeIcon,
+  CreditCardIcon,
 } from "@heroicons/react/24/outline";
 import { LogOut } from "@/utils/nostr/nostr-helper-functions";
 import ProtectedRoute from "@/components/utility-components/protected-route";
@@ -17,20 +17,28 @@ const SettingsPage = () => {
 
   const settingsItems = [
     {
-      id: "shop-profile",
-      title: "Shop Profile",
-      description: "Edit your shop profile",
-      icon: BuildingStorefrontIcon,
-      iconBg: "bg-slate-600",
-      route: "/settings/shop-profile",
-    },
-    {
-      id: "user-profile",
-      title: "User Profile",
-      description: "Edit your user profile",
+      id: "market-profile",
+      title: "Market Profile",
+      description: "Edit your market profile",
       icon: UserIcon,
       iconBg: "bg-slate-600",
-      route: "/settings/user-profile",
+      route: "/settings/market-profile",
+    },
+    {
+      id: "market",
+      title: "Market Stall",
+      description: "Manage your storefront, products, and discounts",
+      icon: BuildingStorefrontIcon,
+      iconBg: "bg-slate-600",
+      route: "/settings/stall",
+    },
+    {
+      id: "email-flows",
+      title: "Email Flows",
+      description: "Create automated email sequences for your customers",
+      icon: EnvelopeIcon,
+      iconBg: "bg-slate-600",
+      route: "/settings/email-flows",
     },
     {
       id: "community",
@@ -41,28 +49,22 @@ const SettingsPage = () => {
       route: "/settings/community",
     },
     {
-      id: "preferences",
-      title: "Preferences",
-      description: "Change your mints, relays, media servers, and more",
+      id: "payments",
+      title: "Payments",
+      description:
+        "Manage your Stripe account, payouts, bank accounts, and verification info",
+      icon: CreditCardIcon,
+      iconBg: "bg-slate-600",
+      route: "/settings/payments",
+    },
+    {
+      id: "account",
+      title: "Account Settings & Preferences",
+      description:
+        "Back up your account, manage your payment settings, and configure your data storage",
       icon: Cog6ToothIcon,
       iconBg: "bg-slate-600",
-      route: "/settings/preferences",
-    },
-    {
-      id: "nostr-wallet-connect",
-      title: "Nostr Wallet Connect",
-      description: "Connect your NIP-47 Nostr Wallet",
-      icon: BanknotesIcon,
-      iconBg: "bg-slate-600",
-      route: "/settings/nwc",
-    },
-    {
-      id: "email-flows",
-      title: "Email Flows",
-      description: "Create automated email sequences for your customers",
-      icon: EnvelopeIcon,
-      iconBg: "bg-slate-600",
-      route: "/settings/email-flows",
+      route: "/settings/account",
     },
     {
       id: "api-keys",

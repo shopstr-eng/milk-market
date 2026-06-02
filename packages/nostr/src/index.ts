@@ -472,9 +472,9 @@ export async function publishSellerListing(params: {
 }): Promise<Event> {
   const isExistingListing = Boolean(
     params.existingEventId ||
-      params.existingDTag ||
-      params.draft.eventId ||
-      params.draft.dTag
+    params.existingDTag ||
+    params.draft.eventId ||
+    params.draft.dTag
   );
   const dTag = params.existingDTag ?? params.draft.dTag ?? createListingDTag();
   const relayHint = getPrimaryRelayHint(params.session);
@@ -601,14 +601,19 @@ export async function uploadSellerListingMedia(params: {
 
   if (!response.ok) {
     const details = await response.text().catch(() => "Unknown server error");
-    throw new SellerNostrError(`Image upload failed (${response.status}): ${details}`);
+    throw new SellerNostrError(
+      `Image upload failed (${response.status}): ${details}`
+    );
   }
 
-  const payload = (await response.json()) as Partial<UploadedSellerListingMedia> & {
-    type?: string;
-  };
+  const payload =
+    (await response.json()) as Partial<UploadedSellerListingMedia> & {
+      type?: string;
+    };
   if (!payload.url || !payload.sha256 || typeof payload.size !== "number") {
-    throw new SellerNostrError("Image upload did not return a valid Blossom response.");
+    throw new SellerNostrError(
+      "Image upload did not return a valid Blossom response."
+    );
   }
 
   return {

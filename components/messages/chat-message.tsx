@@ -19,6 +19,7 @@ import PDFAnnotator from "../utility-components/pdf-annotator";
 import LinkPreview from "./link-preview";
 import { NostrMessageEvent } from "../../utils/types/types";
 import { timeSinceMessageDisplayText } from "../../utils/messages/utils";
+import { copyToClipboard } from "@/utils/clipboard";
 import { getDecodedToken } from "@cashu/cashu-ts";
 import {
   NostrContext,
@@ -42,6 +43,31 @@ function isDecodableToken(token: string): boolean {
   try {
     getDecodedToken(token, []);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+function decodeBuyerPubkeyFromContent(content: string): string | null {
+  const npubMatch = content.match(/npub[a-zA-Z0-9]+/);
+  if (!npubMatch) {
+    return null;
+  }
+
+  try {
+    const decoded = nip19.decode(npubMatch[0]);
+    return decoded.type === "npub" && typeof decoded.data === "string"
+      ? decoded.data
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isDecodableNpub(value: string): boolean {
+  try {
+    const decoded = nip19.decode(value);
+    return decoded.type === "npub" && typeof decoded.data === "string";
   } catch {
     return false;
   }
@@ -87,12 +113,8 @@ const ChatMessage = ({
 
   useEffect(() => {
     if (messageEvent?.content && messageEvent.content.includes("npub1")) {
-      // Find word containing npub using regex
-      const npubMatch = messageEvent.content.match(/npub[a-zA-Z0-9]+/);
-      if (npubMatch && setBuyerPubkey) {
-        const { data: buyerPubkey } = nip19.decode(npubMatch[0]);
-        setBuyerPubkey(buyerPubkey as string);
-      }
+      const buyerPubkey = decodeBuyerPubkeyFromContent(messageEvent.content);
+      setBuyerPubkey(buyerPubkey || "");
     } else {
       setBuyerPubkey("");
     }
@@ -146,8 +168,8 @@ const ChatMessage = ({
     }
   } catch {}
 
-  const handleCopyToken = (token: string) => {
-    navigator.clipboard.writeText(token);
+  const handleCopyToken = async (token: string) => {
+    await copyToClipboard(token);
     setCopiedToClipboard(true);
     setTimeout(() => {
       setCopiedToClipboard(false);
@@ -612,7 +634,7 @@ const ChatMessage = ({
       const subParts = part.split(/(\s+)/);
       return subParts.map((sub, subIndex) => {
         const npubMatch = sub.match(/npub[a-zA-Z0-9]+/);
-        if (npubMatch) {
+        if (npubMatch && isDecodableNpub(npubMatch[0])) {
           return (
             <span
               key={`${index}-${subIndex}`}

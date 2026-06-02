@@ -1,5 +1,6 @@
 import { useState, useEffect, useContext, useMemo } from "react";
 import { useRouter } from "next/router";
+import Head from "next/head";
 import {
   Modal,
   ModalContent,
@@ -19,7 +20,7 @@ import parseTags, {
 import { parseZapsnagNote } from "@/utils/parsers/zapsnag-parser";
 import CheckoutCard from "../../components/utility-components/checkout-card";
 import ZapsnagButton from "../../components/ZapsnagButton";
-import { ProductContext } from "../../utils/context/context";
+import { ProductContext, ShopMapContext } from "../../utils/context/context";
 import { nip19 } from "nostr-tools";
 import {
   RawEventModal,
@@ -27,6 +28,8 @@ import {
 } from "../../components/utility-components/modals/event-modals";
 import { findProductBySlug, getListingSlug } from "@/utils/url-slugs";
 import StorefrontThemeWrapper from "@/components/storefront/storefront-theme-wrapper";
+import ProductPageRenderer from "@/components/storefront/product-page-renderer";
+import FormattedText from "@/components/storefront/formatted-text";
 import { GetServerSideProps } from "next";
 import { OgMetaProps, DEFAULT_OG } from "@/components/og-head";
 import {
@@ -36,6 +39,7 @@ import {
 } from "@/utils/db/db-service";
 import { NostrEvent } from "@/utils/types/types";
 import MilkMarketSpinner from "@/components/utility-components/mm-spinner";
+import { bindAffiliateRefToSeller } from "@/components/utility-components/affiliate-ref-tracker";
 
 type ListingPageProps = {
   ogMeta: OgMetaProps;
@@ -89,11 +93,21 @@ function resolveListingStateFromEvent(
 function eventToOgMeta(event: NostrEvent, urlPath: string): OgMetaProps {
   const productData = parseTags(event);
   if (productData) {
+    const cfg = productData.pageConfig;
+    const galleryImage = cfg?.sections?.find(
+      (s) => s.type === "product_gallery" && s.galleryImages?.length
+    )?.galleryImages?.[0];
     return {
-      title: productData.title || "Milk Market Listing",
+      title: cfg?.metaTitle || productData.title || "Milk Market Listing",
       description:
-        productData.summary || "Check out this product on Milk Market!",
-      image: productData.images?.[0] || "/milk-market.png",
+        cfg?.metaDescription ||
+        productData.summary ||
+        "Check out this product on Milk Market!",
+      image:
+        cfg?.ogImage ||
+        productData.images?.[0] ||
+        galleryImage ||
+        "/milk-market.png",
       url: urlPath,
     };
   }
@@ -103,6 +117,48 @@ function eventToOgMeta(event: NostrEvent, urlPath: string): OgMetaProps {
     description: "Check out this listing on Milk Market!",
     url: urlPath,
   };
+}
+
+function buildProductJsonLd(
+  product: ProductData,
+  shopName?: string
+): Record<string, unknown> | null {
+  if (!product?.title) return null;
+  const cfg = product.pageConfig;
+  const galleryImages =
+    cfg?.sections?.find(
+      (s) => s.type === "product_gallery" && s.galleryImages?.length
+    )?.galleryImages || [];
+  const images = [...(product.images || []), ...galleryImages].filter(Boolean);
+  const description = cfg?.metaDescription || product.summary || product.title;
+  const availability =
+    product.status && product.status !== "active"
+      ? "https://schema.org/OutOfStock"
+      : "https://schema.org/InStock";
+  const price =
+    product.totalCost && product.totalCost > 0
+      ? product.totalCost
+      : product.price;
+  const ld: Record<string, unknown> = {
+    "@context": "https://schema.org/",
+    "@type": "Product",
+    name: cfg?.metaTitle || product.title,
+    description,
+  };
+  if (images.length > 0) ld.image = images;
+  if (product.d) ld.sku = product.d;
+  if (shopName) {
+    ld.brand = { "@type": "Brand", name: shopName };
+  }
+  if (price && product.currency) {
+    ld.offers = {
+      "@type": "Offer",
+      priceCurrency: product.currency,
+      price: String(price),
+      availability,
+    };
+  }
+  return ld;
 }
 
 const LISTING_FALLBACK: OgMetaProps = {
@@ -200,6 +256,37 @@ const Listing = ({ initialProductEvent }: ListingPageProps) => {
   const [sfSellerPubkey, setSfSellerPubkey] = useState("");
   const [isListingNotFound, setIsListingNotFound] = useState(false);
 
+  // When the listing was opened via a stall-scoped URL
+  // (e.g. /stall/<slug>/listing/<productSlug>, internally rewritten with
+  // ?_sf=<slug>), eagerly resolve the shop pubkey + slug so the storefront
+  // theme wraps the page even on direct loads / refreshes / shared links.
+  useEffect(() => {
+    if (!router.isReady) return;
+    const sfParam = router.query._sf;
+    const sfSlug = Array.isArray(sfParam) ? sfParam[0] : sfParam;
+    if (!sfSlug) return;
+    if (sfSellerPubkey) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/storefront/lookup?slug=${encodeURIComponent(sfSlug)}`
+        );
+        if (!cancelled && res.ok) {
+          const data = await res.json();
+          if (data?.pubkey) {
+            sessionStorage.setItem("sf_seller_pubkey", data.pubkey);
+            sessionStorage.setItem("sf_shop_slug", sfSlug);
+            setSfSellerPubkey(data.pubkey);
+          }
+        }
+      } catch {}
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [router.isReady, router.query._sf, sfSellerPubkey]);
+
   const [fiatOrderIsPlaced, setFiatOrderIsPlaced] = useState(false);
   const [fiatOrderFailed, setFiatOrderFailed] = useState(false);
   const [invoiceIsPaid, setInvoiceIsPaid] = useState(false);
@@ -226,7 +313,7 @@ const Listing = ({ initialProductEvent }: ListingPageProps) => {
           ? sessionStorage.getItem("sf_seller_pubkey")
           : null;
       if (sfPk && sfSlug) {
-        router.push(`/shop/${sfSlug}/order-confirmation`);
+        router.push(`/stall/${sfSlug}/order-confirmation`);
       } else {
         router.push("/order-summary");
       }
@@ -235,6 +322,7 @@ const Listing = ({ initialProductEvent }: ListingPageProps) => {
   }, [fiatOrderIsPlaced, invoiceIsPaid, cashuPaymentSent, router]);
 
   const productContext = useContext(ProductContext);
+  const shopMapContext = useContext(ShopMapContext);
 
   useEffect(() => {
     if (router.isReady) {
@@ -315,6 +403,26 @@ const Listing = ({ initialProductEvent }: ListingPageProps) => {
           localStorage.removeItem("sf_seller_pubkey");
           localStorage.removeItem("sf_shop_slug");
         }
+        // Bind any pending `?ref=CODE` to the actual product seller now that
+        // we know who they are. This catches direct listing visits (including
+        // from custom domains) where the affiliate tracker only had the
+        // wildcard slot to work with at first paint.
+        bindAffiliateRefToSeller(matchingEvent.pubkey, router.asPath);
+        // Also seed sf_seller_pubkey so the cart / checkout pick up the
+        // seller for per-seller cookie + affiliate lookups.
+        try {
+          if (typeof window !== "undefined" && window.sessionStorage) {
+            const existing = window.sessionStorage.getItem("sf_seller_pubkey");
+            if (!existing) {
+              window.sessionStorage.setItem(
+                "sf_seller_pubkey",
+                matchingEvent.pubkey
+              );
+            }
+          }
+        } catch {
+          // sessionStorage unavailable; ignore.
+        }
         const resolvedListing = resolveListingStateFromEvent(matchingEvent);
         if (resolvedListing) {
           setRawEvent(resolvedListing.rawEvent);
@@ -376,7 +484,12 @@ const Listing = ({ initialProductEvent }: ListingPageProps) => {
 
     const canonicalSlug = getListingSlug(productData, allParsed);
     if (canonicalSlug && productIdString !== canonicalSlug) {
-      router.replace(`/listing/${canonicalSlug}`, undefined, {
+      const sfParam = router.query._sf;
+      const sfSlug = Array.isArray(sfParam) ? sfParam[0] : sfParam;
+      const target = sfSlug
+        ? `/stall/${sfSlug}/listing/${canonicalSlug}`
+        : `/listing/${canonicalSlug}`;
+      router.replace(target, undefined, {
         shallow: true,
       });
     }
@@ -393,8 +506,24 @@ const Listing = ({ initialProductEvent }: ListingPageProps) => {
 
   const sellerPubkey = productData?.pubkey || "";
 
+  const productJsonLd = useMemo(() => {
+    if (!productData || isZapsnag) return null;
+    const shopName = shopMapContext?.shopData?.get(sellerPubkey)?.content?.name;
+    return buildProductJsonLd(productData, shopName);
+  }, [productData, isZapsnag, shopMapContext?.shopData, sellerPubkey]);
+
   const listingContent = (
     <>
+      {productJsonLd && (
+        <Head>
+          <script
+            type="application/ld+json"
+            dangerouslySetInnerHTML={{
+              __html: JSON.stringify(productJsonLd),
+            }}
+          />
+        </Head>
+      )}
       <div className="flex h-full min-h-screen flex-col bg-white pt-20">
         {productData ? (
           isZapsnag ? (
@@ -433,9 +562,11 @@ const Listing = ({ initialProductEvent }: ListingPageProps) => {
                       </Dropdown>
                     )}
                   </div>
-                  <p className="mb-6 whitespace-pre-wrap text-gray-600">
-                    {productData.summary}
-                  </p>
+                  <FormattedText
+                    as="p"
+                    text={productData.summary || ""}
+                    className="mb-6 whitespace-pre-wrap text-gray-600"
+                  />
                   <ZapsnagButton product={productData} />
                 </div>
               </div>
@@ -455,17 +586,23 @@ const Listing = ({ initialProductEvent }: ListingPageProps) => {
               />
             </div>
           ) : (
-            <CheckoutCard
-              key={productData.id}
-              productData={productData}
-              setFiatOrderIsPlaced={setFiatOrderIsPlaced}
-              setFiatOrderFailed={setFiatOrderFailed}
-              setInvoiceIsPaid={setInvoiceIsPaid}
-              setInvoiceGenerationFailed={setInvoiceGenerationFailed}
-              setCashuPaymentSent={setCashuPaymentSent}
-              setCashuPaymentFailed={setCashuPaymentFailed}
-              rawEvent={rawEvent}
-            />
+            <>
+              <CheckoutCard
+                key={productData.id}
+                productData={productData}
+                setFiatOrderIsPlaced={setFiatOrderIsPlaced}
+                setFiatOrderFailed={setFiatOrderFailed}
+                setInvoiceIsPaid={setInvoiceIsPaid}
+                setInvoiceGenerationFailed={setInvoiceGenerationFailed}
+                setCashuPaymentSent={setCashuPaymentSent}
+                setCashuPaymentFailed={setCashuPaymentFailed}
+                rawEvent={rawEvent}
+              />
+              <ProductPageRenderer
+                product={productData}
+                sellerPubkey={sellerPubkey}
+              />
+            </>
           )
         ) : isListingNotFound ? (
           <div className="flex min-h-[60vh] flex-col items-center justify-center px-4">
@@ -607,7 +744,7 @@ const Listing = ({ initialProductEvent }: ListingPageProps) => {
 
   if (sellerPubkey) {
     return (
-      <StorefrontThemeWrapper sellerPubkey={sellerPubkey}>
+      <StorefrontThemeWrapper sellerPubkey={sellerPubkey} renderChrome={true}>
         {listingContent}
       </StorefrontThemeWrapper>
     );

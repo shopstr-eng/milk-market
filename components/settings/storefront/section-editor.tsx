@@ -8,10 +8,14 @@ import {
   StorefrontIngredientItem,
   StorefrontComparisonColumn,
   StorefrontTimelineItem,
+  StorefrontSpecificationItem,
+  StorefrontSocialPost,
+  StorefrontSocialPostPlatform,
 } from "@/utils/types/types";
 import { FileUploaderButton } from "@/components/utility-components/file-uploader";
 import { ProductData } from "@/utils/parsers/product-parser-functions";
 import { ReviewsContext } from "@/utils/context/context";
+import { useDragReorder } from "@/utils/hooks/useDragReorder";
 
 interface SectionEditorProps {
   section: StorefrontSection;
@@ -25,6 +29,10 @@ interface SectionEditorProps {
   shopPubkey?: string;
   isNew?: boolean;
   onFlashDone?: () => void;
+  dragHandleProps?: React.HTMLAttributes<HTMLButtonElement> & {
+    draggable?: boolean;
+  };
+  focusToken?: number;
 }
 
 const SECTION_LABELS: Record<StorefrontSectionType, string> = {
@@ -40,6 +48,12 @@ const SECTION_LABELS: Record<StorefrontSectionType, string> = {
   image: "Image",
   contact: "Contact",
   reviews: "Customer Reviews",
+  social_posts: "Social Posts",
+  product_description: "Product Description",
+  product_specifications: "Product Specifications",
+  product_shipping_returns: "Shipping & Returns",
+  product_gallery: "Product Gallery",
+  related_products: "Related Products",
 };
 
 const inputWrapperClass =
@@ -66,6 +80,8 @@ export default function SectionEditor({
   shopPubkey,
   isNew,
   onFlashDone,
+  dragHandleProps,
+  focusToken,
 }: SectionEditorProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [isFlashing, setIsFlashing] = useState(false);
@@ -88,6 +104,17 @@ export default function SectionEditor({
     }
   }, [isNew]);
 
+  const initialFocusTokenRef = useRef(focusToken);
+  useEffect(() => {
+    if (focusToken === undefined) return undefined;
+    if (focusToken === initialFocusTokenRef.current) return undefined;
+    setIsExpanded(true);
+    setIsFlashing(true);
+    cardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    const timer = setTimeout(() => setIsFlashing(false), 1500);
+    return () => clearTimeout(timer);
+  }, [focusToken]);
+
   const update = (fields: Partial<StorefrontSection>) => {
     onChange({ ...section, ...fields });
   };
@@ -103,12 +130,22 @@ export default function SectionEditor({
     >
       <div className="flex items-center justify-between px-4 py-3">
         <div className="flex items-center gap-3">
+          {dragHandleProps && (
+            <button
+              type="button"
+              {...dragHandleProps}
+              className="text-base leading-none text-gray-400 select-none hover:text-black"
+            >
+              ⋮⋮
+            </button>
+          )}
           <div className="flex flex-col gap-1">
             <button
               type="button"
               onClick={onMoveUp}
               disabled={isFirst}
               className="text-xs text-gray-400 hover:text-black disabled:opacity-30"
+              aria-label="Move section up"
             >
               ▲
             </button>
@@ -117,6 +154,7 @@ export default function SectionEditor({
               onClick={onMoveDown}
               disabled={isLast}
               className="text-xs text-gray-400 hover:text-black disabled:opacity-30"
+              aria-label="Move section down"
             >
               ▼
             </button>
@@ -186,9 +224,14 @@ export default function SectionEditor({
             />
           )}
 
-          {["about", "story", "text", "ingredients", "contact"].includes(
-            section.type
-          ) && (
+          {[
+            "about",
+            "story",
+            "text",
+            "ingredients",
+            "contact",
+            "product_description",
+          ].includes(section.type) && (
             <Textarea
               label="Body Text"
               classNames={{ inputWrapper: inputWrapperClass }}
@@ -200,21 +243,31 @@ export default function SectionEditor({
           )}
 
           {["hero", "about", "image"].includes(section.type) && (
-            <div className="flex items-center gap-3">
-              <Input
-                label="Image URL"
-                classNames={{ inputWrapper: inputWrapperClass }}
-                variant="bordered"
-                value={section.image || ""}
-                onChange={(e) => update({ image: e.target.value })}
-                className="flex-1"
-              />
-              <FileUploaderButton
-                className="mt-5 rounded-lg border-2 border-black bg-white px-3 py-2 text-sm font-bold text-black"
-                imgCallbackOnUpload={(url) => update({ image: url })}
-              >
-                Upload
-              </FileUploaderButton>
+            <div>
+              <div className="flex items-center gap-3">
+                <Input
+                  label="Image URL"
+                  classNames={{ inputWrapper: inputWrapperClass }}
+                  variant="bordered"
+                  value={section.image || ""}
+                  onChange={(e) => update({ image: e.target.value })}
+                  className="flex-1"
+                />
+                <FileUploaderButton
+                  className="mt-5 rounded-lg border-2 border-black bg-white px-3 py-2 text-sm font-bold text-black"
+                  imgCallbackOnUpload={(url) => update({ image: url })}
+                >
+                  Upload
+                </FileUploaderButton>
+              </div>
+              <p className="mt-1 text-xs text-gray-500">
+                Recommended:{" "}
+                {section.type === "hero"
+                  ? "1600 × 600 px (wide banner)"
+                  : section.type === "about"
+                    ? "1200 × 800 px (3:2)"
+                    : "1600 × 800 px (wide)"}
+              </p>
             </div>
           )}
 
@@ -459,6 +512,178 @@ export default function SectionEditor({
             />
           )}
 
+          {section.type === "product_specifications" && (
+            <>
+              <SpecificationEditor
+                items={section.specifications || []}
+                onChange={(specifications) => update({ specifications })}
+              />
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={section.mergeAutoSpecs === true}
+                  onChange={(e) => update({ mergeAutoSpecs: e.target.checked })}
+                />
+                Also include auto-detected specs from product fields (category,
+                size, condition, etc.)
+              </label>
+            </>
+          )}
+
+          {section.type === "product_shipping_returns" && (
+            <>
+              <Textarea
+                label="Shipping Information"
+                classNames={{ inputWrapper: inputWrapperClass }}
+                variant="bordered"
+                minRows={3}
+                value={section.shippingInfo || ""}
+                onChange={(e) => update({ shippingInfo: e.target.value })}
+                placeholder="Leave blank to use product's shipping settings"
+              />
+              <Textarea
+                label="Returns & Exchanges Policy"
+                classNames={{ inputWrapper: inputWrapperClass }}
+                variant="bordered"
+                minRows={3}
+                value={section.returnsInfo || ""}
+                onChange={(e) => update({ returnsInfo: e.target.value })}
+              />
+            </>
+          )}
+
+          {section.type === "product_gallery" && (
+            <>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={section.useProductImages !== false}
+                  onChange={(e) =>
+                    update({ useProductImages: e.target.checked })
+                  }
+                />
+                Include product images
+              </label>
+              <GalleryImageEditor
+                images={section.galleryImages || []}
+                onChange={(galleryImages) => update({ galleryImages })}
+              />
+            </>
+          )}
+
+          {section.type === "related_products" && (
+            <>
+              <Input
+                label="Limit"
+                classNames={{ inputWrapper: inputWrapperClass }}
+                variant="bordered"
+                type="number"
+                min="1"
+                value={
+                  section.productLimit ? String(section.productLimit) : "6"
+                }
+                onChange={(e) =>
+                  update({
+                    productLimit: e.target.value
+                      ? parseInt(e.target.value)
+                      : undefined,
+                  })
+                }
+              />
+              <Select
+                label="Layout"
+                classNames={selectClassNames}
+                variant="bordered"
+                selectedKeys={[section.productLayout || "grid"]}
+                onChange={(e) =>
+                  update({
+                    productLayout: e.target.value as
+                      | "grid"
+                      | "list"
+                      | "featured",
+                  })
+                }
+              >
+                <SelectItem key="grid" className="text-black">
+                  Grid
+                </SelectItem>
+                <SelectItem key="list" className="text-black">
+                  List
+                </SelectItem>
+              </Select>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={section.excludeCurrentProduct !== false}
+                  onChange={(e) =>
+                    update({ excludeCurrentProduct: e.target.checked })
+                  }
+                />
+                Exclude the current product
+              </label>
+            </>
+          )}
+
+          {section.type === "social_posts" && (
+            <>
+              <Select
+                label="Layout"
+                classNames={selectClassNames}
+                variant="bordered"
+                selectedKeys={[section.socialPostsLayout || "grid"]}
+                onChange={(e) =>
+                  update({
+                    socialPostsLayout: e.target.value as "grid" | "carousel",
+                  })
+                }
+              >
+                <SelectItem key="grid" className="text-black">
+                  Static Grid
+                </SelectItem>
+                <SelectItem key="carousel" className="text-black">
+                  Moving Carousel
+                </SelectItem>
+              </Select>
+
+              {(section.socialPostsLayout || "grid") === "carousel" && (
+                <>
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={section.socialPostsAutoplay !== false}
+                      onChange={(e) =>
+                        update({ socialPostsAutoplay: e.target.checked })
+                      }
+                    />
+                    Auto-scroll the carousel
+                  </label>
+                  <div>
+                    <label className="mb-1 block text-xs text-gray-500">
+                      Scroll Speed: {section.socialPostsSpeed ?? 40}s per loop
+                    </label>
+                    <input
+                      type="range"
+                      min="10"
+                      max="120"
+                      value={section.socialPostsSpeed ?? 40}
+                      onChange={(e) =>
+                        update({
+                          socialPostsSpeed: parseInt(e.target.value),
+                        })
+                      }
+                      className="w-full"
+                    />
+                  </div>
+                </>
+              )}
+
+              <SocialPostsEditor
+                posts={section.socialPosts || []}
+                onChange={(socialPosts) => update({ socialPosts })}
+              />
+            </>
+          )}
+
           {section.type === "comparison" && (
             <ComparisonEditor
               features={section.comparisonFeatures || []}
@@ -641,8 +866,8 @@ function IngredientEditor({
   const getVisualMode = (
     item: StorefrontIngredientItem
   ): "none" | "emoji" | "image" => {
-    if (item.emoji) return "emoji";
-    if (item.image) return "image";
+    if (item.emoji !== undefined) return "emoji";
+    if (item.image !== undefined) return "image";
     return "none";
   };
 
@@ -753,22 +978,27 @@ function IngredientEditor({
                 />
               )}
               {mode === "image" && (
-                <div className="flex flex-1 items-center gap-2">
-                  <Input
-                    label="Image URL"
-                    size="sm"
-                    classNames={{ inputWrapper: inputWrapperClass }}
-                    variant="bordered"
-                    value={item.image || ""}
-                    onChange={(e) => edit(idx, { image: e.target.value })}
-                    className="flex-1"
-                  />
-                  <FileUploaderButton
-                    className="rounded-lg border-2 border-black bg-white px-3 py-2 text-xs font-bold text-black"
-                    imgCallbackOnUpload={(url) => edit(idx, { image: url })}
-                  >
-                    Upload
-                  </FileUploaderButton>
+                <div className="flex flex-1 flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    <Input
+                      label="Image URL"
+                      size="sm"
+                      classNames={{ inputWrapper: inputWrapperClass }}
+                      variant="bordered"
+                      value={item.image || ""}
+                      onChange={(e) => edit(idx, { image: e.target.value })}
+                      className="flex-1"
+                    />
+                    <FileUploaderButton
+                      className="rounded-lg border-2 border-black bg-white px-3 py-2 text-xs font-bold text-black"
+                      imgCallbackOnUpload={(url) => edit(idx, { image: url })}
+                    >
+                      Upload
+                    </FileUploaderButton>
+                  </div>
+                  <p className="text-[11px] text-gray-500">
+                    Recommended: 400 × 400 px (square — fits the circle)
+                  </p>
                 </div>
               )}
             </div>
@@ -1259,6 +1489,278 @@ function ReviewOrderList({
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function SpecificationEditor({
+  items,
+  onChange,
+}: {
+  items: StorefrontSpecificationItem[];
+  onChange: (items: StorefrontSpecificationItem[]) => void;
+}) {
+  const add = () => onChange([...items, { label: "", value: "" }]);
+  const remove = (idx: number) => onChange(items.filter((_, i) => i !== idx));
+  const edit = (idx: number, fields: Partial<StorefrontSpecificationItem>) => {
+    const updated = [...items];
+    updated[idx] = { ...updated[idx]!, ...fields };
+    onChange(updated);
+  };
+
+  return (
+    <div className="space-y-3">
+      <label className="block text-sm font-bold text-gray-700">
+        Specifications
+      </label>
+      <p className="text-xs text-gray-500">
+        Leave empty to auto-generate from product fields (condition, location,
+        categories, sizes, etc.).
+      </p>
+      {items.map((item, idx) => (
+        <div key={idx} className="flex items-start gap-2">
+          <Input
+            label="Label"
+            size="sm"
+            classNames={{ inputWrapper: inputWrapperClass }}
+            variant="bordered"
+            value={item.label}
+            onChange={(e) => edit(idx, { label: e.target.value })}
+            className="flex-1"
+          />
+          <Input
+            label="Value"
+            size="sm"
+            classNames={{ inputWrapper: inputWrapperClass }}
+            variant="bordered"
+            value={item.value}
+            onChange={(e) => edit(idx, { value: e.target.value })}
+            className="flex-1"
+          />
+          <button
+            type="button"
+            onClick={() => remove(idx)}
+            className="mt-2 text-xs text-red-500"
+          >
+            ✕
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={add}
+        className="text-sm font-bold text-blue-600 hover:underline"
+      >
+        + Add Specification
+      </button>
+    </div>
+  );
+}
+
+function GalleryImageEditor({
+  images,
+  onChange,
+}: {
+  images: string[];
+  onChange: (images: string[]) => void;
+}) {
+  const add = (url: string) => onChange([...images, url]);
+  const remove = (idx: number) => onChange(images.filter((_, i) => i !== idx));
+  const dnd = useDragReorder(images, onChange);
+
+  return (
+    <div className="space-y-3">
+      <label className="block text-sm font-bold text-gray-700">
+        Additional Gallery Images
+      </label>
+      {images.map((url, idx) => {
+        const drag = dnd.getItemProps(idx);
+        return (
+          <div
+            key={idx}
+            {...drag.rootProps}
+            className={`flex items-center gap-2 rounded transition-all ${
+              drag.isDragging ? "opacity-40" : ""
+            } ${drag.isDragOver ? "ring-2 ring-blue-400 ring-offset-1" : ""}`}
+          >
+            <button
+              type="button"
+              {...drag.handleProps}
+              className="text-base leading-none text-gray-400 select-none hover:text-black"
+            >
+              ⋮⋮
+            </button>
+            {url && /^https?:\/\/|^data:image\//i.test(url) && (
+              <img
+                src={url}
+                alt=""
+                className="h-10 w-10 flex-shrink-0 rounded object-cover"
+              />
+            )}
+            <Input
+              size="sm"
+              classNames={{ inputWrapper: inputWrapperClass }}
+              variant="bordered"
+              value={url}
+              onChange={(e) => {
+                const updated = [...images];
+                updated[idx] = e.target.value;
+                onChange(updated);
+              }}
+              className="flex-1"
+            />
+            <button
+              type="button"
+              onClick={() => remove(idx)}
+              className="text-xs text-red-500"
+              aria-label="Remove image"
+            >
+              ✕
+            </button>
+          </div>
+        );
+      })}
+      <FileUploaderButton
+        className="rounded-lg border-2 border-black bg-white px-3 py-2 text-sm font-bold text-black"
+        imgCallbackOnUpload={(url) => add(url)}
+      >
+        Upload Image
+      </FileUploaderButton>
+      <p className="text-[11px] text-gray-500">
+        Recommended: 1200 × 1200 px (square) for the product gallery grid.
+      </p>
+    </div>
+  );
+}
+
+const SOCIAL_POST_PLATFORMS: {
+  value: StorefrontSocialPostPlatform;
+  label: string;
+}[] = [
+  { value: "instagram", label: "Instagram" },
+  { value: "x", label: "X (Twitter)" },
+  { value: "facebook", label: "Facebook" },
+  { value: "youtube", label: "YouTube" },
+  { value: "tiktok", label: "TikTok" },
+  { value: "telegram", label: "Telegram" },
+  { value: "website", label: "Website / Blog" },
+  { value: "other", label: "Other" },
+];
+
+function SocialPostsEditor({
+  posts,
+  onChange,
+}: {
+  posts: StorefrontSocialPost[];
+  onChange: (posts: StorefrontSocialPost[]) => void;
+}) {
+  const add = () => onChange([...posts, { platform: "instagram", url: "" }]);
+  const remove = (idx: number) => onChange(posts.filter((_, i) => i !== idx));
+  const edit = (idx: number, fields: Partial<StorefrontSocialPost>) => {
+    const updated = [...posts];
+    updated[idx] = { ...updated[idx]!, ...fields };
+    onChange(updated);
+  };
+
+  return (
+    <div className="space-y-3">
+      <label className="block text-sm font-bold text-gray-700">
+        Social Posts
+      </label>
+      <p className="text-xs text-gray-500">
+        Add links to your posts on Instagram, TikTok, X, YouTube, etc. Each card
+        links out to the original post.
+      </p>
+      {posts.map((post, idx) => (
+        <div key={idx} className="rounded border border-gray-200 p-3">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex-1 space-y-2">
+              <div className="flex gap-2">
+                <Select
+                  label="Platform"
+                  size="sm"
+                  classNames={selectClassNames}
+                  variant="bordered"
+                  selectedKeys={[post.platform]}
+                  onChange={(e) =>
+                    edit(idx, {
+                      platform: e.target.value as StorefrontSocialPostPlatform,
+                    })
+                  }
+                  className="w-40"
+                >
+                  {SOCIAL_POST_PLATFORMS.map((p) => (
+                    <SelectItem key={p.value} className="text-black">
+                      {p.label}
+                    </SelectItem>
+                  ))}
+                </Select>
+                <Input
+                  label="Post URL"
+                  size="sm"
+                  classNames={{ inputWrapper: inputWrapperClass }}
+                  variant="bordered"
+                  value={post.url}
+                  onChange={(e) => edit(idx, { url: e.target.value })}
+                  placeholder="https://instagram.com/p/..."
+                  className="flex-1"
+                />
+              </div>
+              <Textarea
+                label="Caption (optional)"
+                size="sm"
+                classNames={{ inputWrapper: inputWrapperClass }}
+                variant="bordered"
+                minRows={2}
+                value={post.caption || ""}
+                onChange={(e) => edit(idx, { caption: e.target.value })}
+              />
+              <div className="flex gap-2">
+                <Input
+                  label="Author / Handle (optional)"
+                  size="sm"
+                  classNames={{ inputWrapper: inputWrapperClass }}
+                  variant="bordered"
+                  value={post.author || ""}
+                  onChange={(e) => edit(idx, { author: e.target.value })}
+                  placeholder="@yourfarm"
+                  className="flex-1"
+                />
+                <Input
+                  label="Thumbnail URL (optional)"
+                  size="sm"
+                  classNames={{ inputWrapper: inputWrapperClass }}
+                  variant="bordered"
+                  value={post.image || ""}
+                  onChange={(e) => edit(idx, { image: e.target.value })}
+                  className="flex-1"
+                />
+                <FileUploaderButton
+                  className="mt-5 rounded-lg border-2 border-black bg-white px-3 py-2 text-xs font-bold text-black"
+                  imgCallbackOnUpload={(url) => edit(idx, { image: url })}
+                >
+                  Upload
+                </FileUploaderButton>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => remove(idx)}
+              className="text-xs text-red-500"
+              aria-label="Remove post"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={add}
+        className="text-sm font-bold text-blue-600 hover:underline"
+      >
+        + Add Social Post
+      </button>
     </div>
   );
 }

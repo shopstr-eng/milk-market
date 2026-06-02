@@ -176,7 +176,7 @@ const CommunityManagementPage = () => {
       } else {
         setPasswordError("Incorrect password. Please try again.");
       }
-    } catch (error) {
+    } catch {
       setPasswordError("An error occurred. Please try again.");
     }
   };
@@ -293,7 +293,7 @@ const CommunityManagementPage = () => {
           >
             <ModalContent>
               <ModalHeader className="flex flex-col gap-1 text-xl font-bold text-black">
-                Enter Seller Password
+                Enter Vendor Password
               </ModalHeader>
               <ModalBody>
                 <Input

@@ -12,10 +12,7 @@ export default function ListingsStackLayout() {
         contentStyle: { backgroundColor: sellerThemeTokens.background },
       }}
     >
-      <Stack.Screen
-        name="index"
-        options={{ title: "Listings" }}
-      />
+      <Stack.Screen name="index" options={{ title: "Listings" }} />
       <Stack.Screen
         name="new"
         options={{ title: "Create listing", headerBackTitle: "Listings" }}

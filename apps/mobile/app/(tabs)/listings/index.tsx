@@ -41,7 +41,10 @@ export default function ListingsIndexScreen() {
       return [];
     }
 
-    return selectSellerListingSummaries(listingEventsQuery.data, session.pubkey);
+    return selectSellerListingSummaries(
+      listingEventsQuery.data,
+      session.pubkey
+    );
   }, [listingEventsQuery.data, session]);
 
   if (!session) {
@@ -81,9 +84,7 @@ export default function ListingsIndexScreen() {
       await refreshListings();
       setActionMessage("Listing deleted.");
     } catch (caughtError) {
-      setActionError(
-        getErrorMessage(caughtError, "Listing deletion failed.")
-      );
+      setActionError(getErrorMessage(caughtError, "Listing deletion failed."));
     } finally {
       setBusyListingId("");
       setBusyAction("");
@@ -116,7 +117,9 @@ export default function ListingsIndexScreen() {
       });
       await refreshListings();
       setActionMessage(
-        nextStatus === "active" ? "Listing marked active." : "Listing marked inactive."
+        nextStatus === "active"
+          ? "Listing marked active."
+          : "Listing marked inactive."
       );
     } catch (caughtError) {
       setActionError(
@@ -213,16 +216,12 @@ export default function ListingsIndexScreen() {
             <View style={styles.buttonGroup}>
               <ActionButton
                 label="Edit"
-                onPress={() =>
-                  router.push(`/listings/${listing.id}` as Href)
-                }
+                onPress={() => router.push(`/listings/${listing.id}` as Href)}
                 variant="secondary"
               />
               <ActionButton
                 label={
-                  listing.status === "active"
-                    ? "Mark inactive"
-                    : "Mark active"
+                  listing.status === "active" ? "Mark inactive" : "Mark active"
                 }
                 onPress={() => handleStatusToggle(listing.id)}
                 variant="secondary"

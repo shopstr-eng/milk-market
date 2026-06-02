@@ -24,7 +24,7 @@ const RESERVED_SLUGS = [
   "admin",
   "mail",
   "ftp",
-  "shop",
+  "stall",
   "marketplace",
   "settings",
   "orders",
@@ -39,6 +39,13 @@ const RESERVED_SLUGS = [
   "blog",
   "docs",
   "status",
+  "my-listings",
+  "about",
+  "contact",
+  "faq",
+  "privacy",
+  "terms",
+  "order-summary",
 ];
 
 export default async function handler(
@@ -127,7 +134,7 @@ export default async function handler(
   }
 
   if (RESERVED_SLUGS.includes(sanitized)) {
-    return res.status(400).json({ error: "This shop name is reserved" });
+    return res.status(400).json({ error: "This stall name is reserved" });
   }
 
   try {

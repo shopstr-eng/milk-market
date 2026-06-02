@@ -44,7 +44,7 @@ function normalizeRelativeShopPath(value: string, shopSlug: string): string {
     .map(safeSegment)
     .filter(Boolean);
   const safePath = segments.join("/");
-  const base = shopSlug ? `/shop/${shopSlug}` : "";
+  const base = shopSlug ? `/stall/${shopSlug}` : "";
   if (!safePath) return base || "/";
   return `${base}/${safePath}${suffix}`;
 }
@@ -93,7 +93,7 @@ export function sanitizeStorefrontNavHref(
   shopSlug: string,
   fallback?: string
 ): string {
-  const safeFallback = fallback || (shopSlug ? `/shop/${shopSlug}` : "/");
+  const safeFallback = fallback || (shopSlug ? `/stall/${shopSlug}` : "/");
   const trimmed = link.href?.trim();
 
   if (!trimmed) return safeFallback;
@@ -115,12 +115,26 @@ export function isExternalStorefrontHref(href: string): boolean {
 }
 
 function sanitizeSection(section: StorefrontSection): StorefrontSection {
-  if (!section.ctaLink) return section;
+  let updated = section;
 
-  return {
-    ...section,
-    ctaLink: sanitizeStorefrontSectionLink(section.ctaLink),
-  };
+  if (updated.ctaLink) {
+    updated = {
+      ...updated,
+      ctaLink: sanitizeStorefrontSectionLink(updated.ctaLink),
+    };
+  }
+
+  if (updated.socialPosts && updated.socialPosts.length > 0) {
+    updated = {
+      ...updated,
+      socialPosts: updated.socialPosts.map((post) => ({
+        ...post,
+        url: sanitizeStorefrontSocialLink(post.url),
+      })),
+    };
+  }
+
+  return updated;
 }
 
 function sanitizePage(page: StorefrontPage): StorefrontPage {

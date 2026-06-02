@@ -23,7 +23,6 @@ import {
 import { locationAvatar } from "./dropdowns/location-dropdown";
 import {
   ArrowLongDownIcon,
-  ArrowLongUpIcon,
   EllipsisVerticalIcon,
 } from "@heroicons/react/24/outline";
 import BeefInitiativeBadge from "./beef-initiative-badge";
@@ -34,6 +33,7 @@ import {
 } from "@/utils/context/context";
 import FreeShippingNotification from "../free-shipping-notification";
 import FailureModal from "../utility-components/failure-modal";
+import { copyToClipboard } from "@/utils/clipboard";
 import SuccessModal from "../utility-components/success-modal";
 import SignInModal from "../sign-in/SignInModal";
 import currencySelection from "../../public/currencySelection.json";
@@ -48,6 +48,7 @@ import SubscriptionPricingCards from "./subscription-pricing-cards";
 import SellerReviewReply from "./seller-review-reply";
 import { getLocalStorageJson } from "@/utils/safe-json";
 import { CartDiscountsMap, isCartDiscountsMap } from "@/utils/cart-discounts";
+import { getAffiliateRefCookie } from "./affiliate-ref-tracker";
 
 const SUMMARY_CHARACTER_LIMIT = 200;
 
@@ -83,8 +84,7 @@ export default function CheckoutCard({
 
   const [isExpanded, setIsExpanded] = useState(false);
   const [isBeingPaid, setIsBeingPaid] = useState(false);
-  const [visibleImages, setVisibleImages] = useState<string[]>([]);
-  const [showAllImages, setShowAllImages] = useState(false);
+  const [carouselStart, setCarouselStart] = useState(0);
   const [selectedImage, setSelectedImage] = useState(productData.images[0]);
   const [selectedSize, setSelectedSize] = useState<string | undefined>(
     undefined
@@ -110,7 +110,23 @@ export default function CheckoutCard({
   const [currentPrice, setCurrentPrice] = useState(productData.price);
   const [discountCode, setDiscountCode] = useState("");
   const [appliedDiscount, setAppliedDiscount] = useState<number>(0);
+  // Shipping discount tied to the same redeemed code. Independent from the
+  // product percentage — a welcome code can be shipping-only (e.g. free
+  // shipping with 0% product discount).
+  const [appliedShippingDiscount, setAppliedShippingDiscount] = useState<{
+    type: "none" | "free" | "percent" | "fixed";
+    value: number;
+  }>({ type: "none", value: 0 });
   const [discountError, setDiscountError] = useState("");
+  const [affiliateMeta, setAffiliateMeta] = useState<{
+    code: string;
+    codeId: number;
+    affiliateId: number;
+    buyerDiscountType: "percent" | "fixed";
+    buyerDiscountValue: number;
+    rebateType: "percent" | "fixed";
+    rebateValue: number;
+  } | null>(null);
   const [satsEstimate, setSatsEstimate] = useState<number | null>(null);
 
   const hasSubscription = !!(
@@ -202,28 +218,19 @@ export default function CheckoutCard({
     return `${productData.summary.slice(0, SUMMARY_CHARACTER_LIMIT)}...`;
   };
 
-  const calculateVisibleImages = (containerHeight: number) => {
-    const imageHeight = containerHeight / 3; // You can adjust this '3' if needed
-    const visibleCount = Math.max(3, Math.floor(containerHeight / imageHeight));
-    setVisibleImages(productData.images.slice(0, visibleCount));
+  const VISIBLE_THUMBNAIL_COUNT = 3;
+
+  const carouselThumbnails =
+    productData.images.length <= VISIBLE_THUMBNAIL_COUNT
+      ? productData.images.map((image, index) => ({ image, index }))
+      : Array.from({ length: VISIBLE_THUMBNAIL_COUNT }, (_, i) => {
+          const index = (carouselStart + i) % productData.images.length;
+          return { image: productData.images[index], index };
+        });
+
+  const cycleCarousel = () => {
+    setCarouselStart((prev) => (prev + 1) % productData.images.length);
   };
-
-  useEffect(() => {
-    if (containerRef.current) {
-      const resizeObserver = new ResizeObserver((entries) => {
-        for (const entry of entries) {
-          calculateVisibleImages(entry.contentRect.height);
-        }
-      });
-
-      resizeObserver.observe(containerRef.current);
-
-      return () => {
-        resizeObserver.disconnect();
-      };
-    }
-    return;
-  }, [selectedImage, isBeingPaid]);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -359,7 +366,18 @@ export default function CheckoutCard({
     setCart(updatedCart);
     localStorage.setItem("cart", JSON.stringify(updatedCart));
 
-    if (appliedDiscount > 0 && discountCode) {
+    // Affiliate codes and regular discount codes live in different tables, so
+    // they need to be persisted under different keys — otherwise the cart
+    // would revalidate an affiliate code against the regular discount-code
+    // endpoint, treat it as invalid, and silently drop it at checkout.
+    if (affiliateMeta && affiliateMeta.code) {
+      try {
+        const stored = localStorage.getItem("cartAffiliates");
+        const affs = stored ? JSON.parse(stored) : {};
+        affs[productData.pubkey] = { code: affiliateMeta.code };
+        localStorage.setItem("cartAffiliates", JSON.stringify(affs));
+      } catch {}
+    } else if (appliedDiscount > 0 && discountCode) {
       const storedDiscounts = localStorage.getItem("cartDiscounts");
       const discounts = storedDiscounts ? JSON.parse(storedDiscounts) : {};
       discounts[productData.pubkey] = {
@@ -376,8 +394,16 @@ export default function CheckoutCard({
     ) {
       setShowFreeShippingNotification(true);
 
-      // Store discount code if applied
-      if (appliedDiscount > 0 && discountCode) {
+      // Store discount code if applied — affiliate codes go to a separate
+      // key so the cart's regular-discount revalidator doesn't drop them.
+      if (affiliateMeta && affiliateMeta.code) {
+        try {
+          const stored = localStorage.getItem("cartAffiliates");
+          const affs = stored ? JSON.parse(stored) : {};
+          affs[productData.pubkey] = { code: affiliateMeta.code };
+          localStorage.setItem("cartAffiliates", JSON.stringify(affs));
+        } catch {}
+      } else if (appliedDiscount > 0 && discountCode) {
         const discounts = getLocalStorageJson<CartDiscountsMap>(
           "cartDiscounts",
           {},
@@ -405,16 +431,20 @@ export default function CheckoutCard({
 
     const slug = getListingSlug(productData, allParsed);
     const listingPath = slug || productData.id;
+    const sellerShop = shopMapContext.shopData.get(productData.pubkey);
+    const sellerShopSlug = sellerShop?.content?.storefront?.shopSlug;
+    const sharePath = sellerShopSlug
+      ? `/stall/${sellerShopSlug}/listing/${listingPath}`
+      : `/listing/${listingPath}`;
+    const shareUrl = `${window.location.origin}${sharePath}`;
     const shareData = {
       title: productData.title,
-      url: `${window.location.origin}/listing/${listingPath}`,
+      url: shareUrl,
     };
     if (navigator.share) {
       await navigator.share(shareData);
     } else {
-      navigator.clipboard.writeText(
-        `${window.location.origin}/listing/${listingPath}`
-      );
+      await copyToClipboard(shareUrl);
       setShowSuccessModal(true);
     }
   };
@@ -442,6 +472,64 @@ export default function CheckoutCard({
     }
   };
 
+  // Auto-apply affiliate code from the ?ref= cookie when the buyer lands on
+  // a listing (custom domain or marketplace). Mirrors the cart's auto-apply
+  // behavior so single-product checkouts also pick up the referral.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (!productData?.pubkey) return;
+    if (productData.pubkey === userPubkey) return; // never self-attribute
+    // Allow a re-run if we previously stored affiliateMeta but couldn't
+    // compute a visible percent (fixed-amount codes when currentPrice was
+    // still 0 on first paint). Otherwise, once applied we leave it alone.
+    if (appliedDiscount > 0) return;
+    if (affiliateMeta && affiliateMeta.buyerDiscountType !== "fixed") return;
+    if (affiliateMeta && currentPrice <= 0) return;
+    const code =
+      (affiliateMeta && affiliateMeta.code) ||
+      getAffiliateRefCookie(productData.pubkey);
+    if (!code) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/affiliates/validate?sellerPubkey=${productData.pubkey}&code=${encodeURIComponent(
+            code
+          )}&currency=${encodeURIComponent(productData.currency || "usd")}`
+        );
+        if (!res.ok) return;
+        const aff = await res.json();
+        if (cancelled || !aff?.valid) return;
+        let percent = 0;
+        if (aff.buyerDiscountType === "percent") {
+          percent = Number(aff.buyerDiscountValue) || 0;
+        } else if (aff.buyerDiscountType === "fixed") {
+          if (currentPrice > 0) {
+            percent = Math.min(
+              100,
+              (Number(aff.buyerDiscountValue) / currentPrice) * 100
+            );
+          }
+        }
+        if (cancelled) return;
+        setDiscountCode(code);
+        setAppliedDiscount(percent);
+        setAffiliateMeta({
+          code,
+          codeId: aff.codeId,
+          affiliateId: aff.affiliateId,
+          buyerDiscountType: aff.buyerDiscountType,
+          buyerDiscountValue: Number(aff.buyerDiscountValue) || 0,
+          rebateType: aff.rebateType,
+          rebateValue: Number(aff.rebateValue) || 0,
+        });
+      } catch {}
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [productData?.pubkey, productData?.currency, currentPrice, userPubkey]);
+
   const handleApplyDiscount = async () => {
     if (!discountCode.trim()) {
       setDiscountError("Please enter a discount code");
@@ -462,24 +550,40 @@ export default function CheckoutCard({
 
       const result = await response.json();
 
-      if (result.valid && result.discount_percentage) {
-        setAppliedDiscount(result.discount_percentage);
+      const shipType = (result.shipping_discount_type || "none") as
+        | "none"
+        | "free"
+        | "percent"
+        | "fixed";
+      const shipVal = Number(result.shipping_discount_value) || 0;
+      const hasShipping = shipType !== "none";
+
+      if (
+        result.valid &&
+        (Number(result.discount_percentage) > 0 || hasShipping)
+      ) {
+        setAppliedDiscount(Number(result.discount_percentage) || 0);
+        setAppliedShippingDiscount({ type: shipType, value: shipVal });
         setDiscountError("");
       } else {
         setDiscountError("Invalid or expired discount code");
         setAppliedDiscount(0);
+        setAppliedShippingDiscount({ type: "none", value: 0 });
       }
     } catch (error) {
       console.error("Failed to apply discount:", error);
       setDiscountError("Failed to apply discount code");
       setAppliedDiscount(0);
+      setAppliedShippingDiscount({ type: "none", value: 0 });
     }
   };
 
   const handleRemoveDiscount = () => {
     setDiscountCode("");
     setAppliedDiscount(0);
+    setAppliedShippingDiscount({ type: "none", value: 0 });
     setDiscountError("");
+    setAffiliateMeta(null);
   };
 
   const renderSizeGrid = () => {
@@ -591,39 +695,30 @@ export default function CheckoutCard({
                 {/* Vertical Thumbnails */}
                 <div className="flex w-1/4 flex-col gap-2">
                   <div ref={containerRef} className="flex-1 overflow-hidden">
-                    <div
-                      className={`flex flex-col space-y-2 ${
-                        showAllImages ? "overflow-y-auto" : ""
-                      }`}
-                    >
-                      {(showAllImages ? productData.images : visibleImages).map(
-                        (image, index) => (
-                          <img
-                            key={index}
-                            src={image}
-                            alt={`Product image ${index + 1}`}
-                            className={`w-full cursor-pointer rounded-md object-cover ${
-                              image === selectedImage
-                                ? "border-primary-yellow border-2"
-                                : "border-2 border-transparent"
-                            }`}
-                            style={{ aspectRatio: "1 / 1" }}
-                            onClick={() => setSelectedImage(image)}
-                          />
-                        )
-                      )}
+                    <div className="flex flex-col space-y-2">
+                      {carouselThumbnails.map(({ image, index }) => (
+                        <img
+                          key={index}
+                          src={image}
+                          alt={`Product image ${index + 1}`}
+                          className={`w-full cursor-pointer rounded-md object-cover ${
+                            image === selectedImage
+                              ? "border-primary-yellow border-2"
+                              : "border-2 border-transparent"
+                          }`}
+                          style={{ aspectRatio: "1 / 1" }}
+                          onClick={() => setSelectedImage(image)}
+                        />
+                      ))}
                     </div>
                   </div>
                   {productData.images.length > 3 && (
                     <button
-                      onClick={() => setShowAllImages(!showAllImages)}
+                      onClick={cycleCarousel}
+                      aria-label="Show next image"
                       className="shadow-neo flex flex-col items-center rounded-md border-2 border-black bg-white py-1 transition-transform hover:-translate-y-0.5 active:translate-y-0.5"
                     >
-                      {showAllImages ? (
-                        <ArrowLongUpIcon className="h-5 w-5" />
-                      ) : (
-                        <ArrowLongDownIcon className="h-5 w-5" />
-                      )}
+                      <ArrowLongDownIcon className="h-5 w-5" />
                     </button>
                   )}
                 </div>
@@ -848,46 +943,69 @@ export default function CheckoutCard({
                   </div>
                 ) : (
                   <>
-                    {productData.pubkey !== userPubkey && (
-                      <div className="mt-4 space-y-2">
-                        <div className="flex gap-2">
-                          <Input
-                            label="Discount Code"
-                            placeholder="Enter code"
-                            value={discountCode}
-                            onChange={(e) =>
-                              setDiscountCode(e.target.value.toUpperCase())
-                            }
-                            className="flex-1 text-white"
-                            disabled={appliedDiscount > 0}
-                            isInvalid={!!discountError}
-                            errorMessage={discountError}
-                          />
-                          {appliedDiscount > 0 ? (
-                            <Button
-                              color="warning"
-                              onClick={handleRemoveDiscount}
-                            >
-                              Remove
-                            </Button>
-                          ) : (
-                            <Button
-                              className={BLUEBUTTONCLASSNAMES}
-                              onClick={handleApplyDiscount}
-                            >
-                              Apply
-                            </Button>
-                          )}
-                        </div>
-                        {appliedDiscount > 0 && (
-                          <p className="text-sm text-green-600">
-                            {appliedDiscount}% discount applied! You save{" "}
-                            {currentPrice - discountedPrice}{" "}
-                            {productData.currency}
-                          </p>
-                        )}
-                      </div>
-                    )}
+                    {productData.pubkey !== userPubkey &&
+                      (() => {
+                        // A code is "active" when it carries EITHER a product
+                        // percent discount OR a shipping discount (free /
+                        // percent / fixed). Gating purely on appliedDiscount
+                        // > 0 hid the Applied/Remove UI for shipping-only
+                        // welcome codes — the buyer would hit Apply, the
+                        // code validated, but nothing visibly changed.
+                        const shipType = appliedShippingDiscount.type;
+                        const shipVal = appliedShippingDiscount.value;
+                        const hasShip = shipType !== "none";
+                        const isApplied = appliedDiscount > 0 || hasShip;
+                        const shipLabel =
+                          shipType === "free"
+                            ? "free shipping"
+                            : shipType === "percent"
+                              ? `${shipVal}% off shipping`
+                              : shipType === "fixed"
+                                ? `${shipVal} off shipping`
+                                : "";
+                        return (
+                          <div className="mt-4 space-y-2">
+                            <div className="flex gap-2">
+                              <Input
+                                label="Discount Code"
+                                placeholder="Enter code"
+                                value={discountCode}
+                                onChange={(e) =>
+                                  setDiscountCode(e.target.value.toUpperCase())
+                                }
+                                className="flex-1 text-white"
+                                disabled={isApplied}
+                                isInvalid={!!discountError}
+                                errorMessage={discountError}
+                              />
+                              {isApplied ? (
+                                <Button
+                                  color="warning"
+                                  onClick={handleRemoveDiscount}
+                                >
+                                  Remove
+                                </Button>
+                              ) : (
+                                <Button
+                                  className={BLUEBUTTONCLASSNAMES}
+                                  onClick={handleApplyDiscount}
+                                >
+                                  Apply
+                                </Button>
+                              )}
+                            </div>
+                            {isApplied && (
+                              <p className="text-sm text-green-600">
+                                {appliedDiscount > 0 && hasShip
+                                  ? `${appliedDiscount}% discount + ${shipLabel} applied!`
+                                  : appliedDiscount > 0
+                                    ? `${appliedDiscount}% discount applied! You save ${currentPrice - discountedPrice} ${productData.currency}`
+                                    : `${shipLabel.charAt(0).toUpperCase()}${shipLabel.slice(1)} applied!`}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })()}
 
                     {/* Location Chip */}
                     <div className="flex items-center gap-2">
@@ -971,7 +1089,7 @@ export default function CheckoutCard({
                   </>
                 )}
 
-                {/* Contact Seller */}
+                {/* Contact Vendor */}
                 {productData.pubkey !== userPubkey && (
                   <p className="text-sm text-black">
                     or{" "}
@@ -1100,10 +1218,17 @@ export default function CheckoutCard({
               selectedBulkOption={
                 selectedBulkOption ? parseInt(selectedBulkOption) : undefined
               }
-              discountCode={appliedDiscount > 0 ? discountCode : undefined}
+              discountCode={
+                appliedDiscount > 0 || appliedShippingDiscount.type !== "none"
+                  ? discountCode
+                  : undefined
+              }
               discountPercentage={
                 appliedDiscount > 0 ? appliedDiscount : undefined
               }
+              shippingDiscountType={appliedShippingDiscount.type}
+              shippingDiscountValue={appliedShippingDiscount.value}
+              affiliateMeta={affiliateMeta}
               originalPrice={currentPrice}
               isSubscription={hasSubscription && isSubscriptionSelected}
               subscriptionFrequency={

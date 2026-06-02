@@ -33,9 +33,9 @@ import currencySelection from "../../public/currencySelection.json";
 import { ShopMapContext, ProfileMapContext } from "@/utils/context/context";
 import { nip19 } from "nostr-tools";
 import StorefrontThemeWrapper from "@/components/storefront/storefront-theme-wrapper";
-import ProtectedRoute from "@/components/utility-components/protected-route";
 import { getLocalStorageJson } from "@/utils/safe-json";
 import { CartDiscountsMap, isCartDiscountsMap } from "@/utils/cart-discounts";
+import { getAffiliateRefCookie } from "@/components/utility-components/affiliate-ref-tracker";
 
 interface QuantitySelectorProps {
   value: number;
@@ -104,6 +104,7 @@ export default function Component() {
 
   const [sfSellerPubkey, setSfSellerPubkey] = useState("");
   const [sfShopSlug, setSfShopSlug] = useState("");
+  const cartRouter = useRouter();
 
   useEffect(() => {
     const stored = sessionStorage.getItem("sf_seller_pubkey");
@@ -111,6 +112,37 @@ export default function Component() {
     const storedSlug = sessionStorage.getItem("sf_shop_slug");
     if (storedSlug) setSfShopSlug(storedSlug);
   }, []);
+
+  // When the cart was opened via /stall/<slug>/cart (rewritten with ?_sf=<slug>),
+  // resolve the shop pubkey + slug so the storefront theme wraps the page even
+  // on direct loads / refreshes / shared links.
+  useEffect(() => {
+    if (!cartRouter.isReady) return;
+    const sfParam = cartRouter.query._sf;
+    const sfSlugFromUrl = Array.isArray(sfParam) ? sfParam[0] : sfParam;
+    if (!sfSlugFromUrl) return;
+    if (sfSellerPubkey) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/storefront/lookup?slug=${encodeURIComponent(sfSlugFromUrl)}`
+        );
+        if (!cancelled && res.ok) {
+          const data = await res.json();
+          if (data?.pubkey) {
+            sessionStorage.setItem("sf_seller_pubkey", data.pubkey);
+            sessionStorage.setItem("sf_shop_slug", sfSlugFromUrl);
+            setSfSellerPubkey(data.pubkey);
+            setSfShopSlug(sfSlugFromUrl);
+          }
+        }
+      } catch {}
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [cartRouter.isReady, cartRouter.query._sf, sfSellerPubkey]);
 
   const [products, setProducts] = useState<ProductData[]>([]);
   const [satPrices, setSatPrices] = useState<{ [key: string]: number | null }>(
@@ -158,10 +190,32 @@ export default function Component() {
   const [appliedDiscounts, setAppliedDiscounts] = useState<{
     [pubkey: string]: number;
   }>({});
+  // Per-seller shipping discount captured from the same discount-code
+  // validation as `appliedDiscounts`. Codes may carry a shipping discount
+  // in addition to (or instead of) a product percentage, so we track it
+  // separately and pass it to CartInvoiceCard to apply at shipping math
+  // time. Affiliate codes never carry shipping discounts.
+  const [appliedShippingDiscounts, setAppliedShippingDiscounts] = useState<{
+    [pubkey: string]: {
+      type: "none" | "free" | "percent" | "fixed";
+      value: number;
+    };
+  }>({});
   const [discountErrors, setDiscountErrors] = useState<{
     [pubkey: string]: string;
   }>({});
   const [isValidatingDiscounts, setIsValidatingDiscounts] = useState(false);
+
+  type AffiliateMeta = {
+    code: string;
+    codeId: number;
+    affiliateId: number;
+    rebateType: "percent" | "fixed";
+    rebateValue: number;
+  };
+  const [affiliateMetaBySeller, setAffiliateMetaBySeller] = useState<{
+    [pubkey: string]: AffiliateMeta;
+  }>({});
 
   const [sellerStripeStatus, setSellerStripeStatus] = useState<
     Record<string, boolean>
@@ -308,7 +362,7 @@ export default function Component() {
       setInvoiceIsPaid(false);
       setCashuPaymentSent(false);
       if (sfSellerPubkey && sfShopSlug) {
-        router.push(`/shop/${sfShopSlug}/order-confirmation`);
+        router.push(`/stall/${sfShopSlug}/order-confirmation`);
       } else {
         router.push("/order-summary");
       }
@@ -414,12 +468,31 @@ export default function Component() {
             }
 
             const result = await response.json();
+            // A code is considered "valid for this cart" if it carries a
+            // product percentage OR a shipping discount. A welcome code can
+            // be shipping-only, so we don't gate on discount_percentage > 0.
+            const shipType = (result.shipping_discount_type || "none") as
+              | "none"
+              | "free"
+              | "percent"
+              | "fixed";
+            const shipVal = Number(result.shipping_discount_value) || 0;
+            const hasShipping = shipType !== "none";
             if (
               result.valid &&
-              typeof result.discount_percentage === "number" &&
-              result.discount_percentage > 0
+              ((typeof result.discount_percentage === "number" &&
+                result.discount_percentage > 0) ||
+                hasShipping)
             ) {
-              return { pubkey, code, percentage: result.discount_percentage };
+              return {
+                pubkey,
+                code,
+                percentage:
+                  typeof result.discount_percentage === "number"
+                    ? result.discount_percentage
+                    : 0,
+                shipping: { type: shipType, value: shipVal },
+              };
             }
 
             return null;
@@ -428,7 +501,12 @@ export default function Component() {
               `Network error revalidating discount code for ${pubkey}; keeping for next load.`,
               error
             );
-            return { pubkey, code, percentage: null as null };
+            return {
+              pubkey,
+              code,
+              percentage: null as null,
+              shipping: null as null,
+            };
           }
         })
       );
@@ -439,6 +517,12 @@ export default function Component() {
 
       const codes: { [pubkey: string]: string } = {};
       const applied: { [pubkey: string]: number } = {};
+      const appliedShipping: {
+        [pubkey: string]: {
+          type: "none" | "free" | "percent" | "fixed";
+          value: number;
+        };
+      } = {};
       const refreshedDiscounts: CartDiscountsMap = {};
 
       validatedDiscounts.forEach((entry) => {
@@ -449,11 +533,15 @@ export default function Component() {
         if (entry.percentage !== null) {
           codes[entry.pubkey] = entry.code;
           applied[entry.pubkey] = entry.percentage;
+          if (entry.shipping && entry.shipping.type !== "none") {
+            appliedShipping[entry.pubkey] = entry.shipping;
+          }
         }
       });
 
       setDiscountCodes(codes);
       setAppliedDiscounts(applied);
+      setAppliedShippingDiscounts(appliedShipping);
       setIsValidatingDiscounts(false);
 
       if (Object.keys(refreshedDiscounts).length > 0) {
@@ -602,6 +690,82 @@ export default function Component() {
   }, [products, quantities, appliedDiscounts]);
 
   useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (uniqueSellerPubkeys.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      // Load any affiliate codes that were attached at add-to-cart time
+      // (persisted by checkout-card.tsx under `cartAffiliates`). This is
+      // the durable attribution path — even if the ?ref= cookie has been
+      // cleared or expired, the affiliate code stays bound to the cart
+      // item the buyer added under that referral.
+      let persistedAffiliates: Record<string, { code?: string }> = {};
+      try {
+        const raw = localStorage.getItem("cartAffiliates");
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === "object")
+            persistedAffiliates = parsed;
+        }
+      } catch {}
+
+      for (const pubkey of uniqueSellerPubkeys) {
+        if (cancelled) return;
+        // Strict mutual exclusion: if anything is already attached to this
+        // seller (regular discount OR affiliate), don't auto-apply on top.
+        if (discountCodes[pubkey] || affiliateMetaBySeller[pubkey]) continue;
+        // Prefer the per-cart persisted code (set when the item was added),
+        // then fall back to the cookie. The cookie path also prefers a code
+        // bound to this seller over the wildcard slot, so a code captured
+        // on seller A doesn't leak onto seller B at multi-seller checkout.
+        const code =
+          persistedAffiliates[pubkey]?.code ||
+          getAffiliateRefCookie(pubkey) ||
+          null;
+        if (!code) continue;
+        try {
+          const res = await fetch(
+            `/api/affiliates/validate?sellerPubkey=${pubkey}&code=${encodeURIComponent(
+              code
+            )}`
+          );
+          if (!res.ok) continue;
+          const aff = await res.json();
+          if (!aff?.valid) continue;
+          let percent = 0;
+          if (aff.buyerDiscountType === "percent") {
+            percent = Number(aff.buyerDiscountValue) || 0;
+          } else if (aff.buyerDiscountType === "fixed") {
+            const sub = getSellerSubtotalInCurrency(pubkey);
+            if (sub > 0) {
+              percent = Math.min(
+                100,
+                (Number(aff.buyerDiscountValue) / sub) * 100
+              );
+            }
+          }
+          if (cancelled) return;
+          setDiscountCodes((p) => ({ ...p, [pubkey]: code }));
+          setAppliedDiscounts((p) => ({ ...p, [pubkey]: percent }));
+          setAffiliateMetaBySeller((p) => ({
+            ...p,
+            [pubkey]: {
+              code,
+              codeId: aff.codeId,
+              affiliateId: aff.affiliateId,
+              rebateType: aff.rebateType,
+              rebateValue: Number(aff.rebateValue) || 0,
+            },
+          }));
+        } catch {}
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sellerPubkeyKey]);
+
+  useEffect(() => {
     const shippingTypeMap: { [key: string]: ShippingOptionsType } = {};
     products.forEach((product) => {
       if (product.shippingType !== undefined) {
@@ -666,6 +830,19 @@ export default function Component() {
       return;
     }
 
+    // Mutual exclusivity: a regular discount and an affiliate code can't both
+    // apply to the same seller. If the user already has one active, ask them
+    // to remove it before trying another so they don't get a confusing
+    // silent failure later in the flow.
+    if (appliedDiscounts[pubkey] && affiliateMetaBySeller[pubkey]) {
+      setDiscountErrors({
+        ...discountErrors,
+        [pubkey]:
+          "An affiliate code is already applied. Remove it before adding another code.",
+      });
+      return;
+    }
+
     try {
       const response = await fetch(
         `/api/db/discount-codes?validate=true&code=${encodeURIComponent(
@@ -683,10 +860,35 @@ export default function Component() {
 
       const result = await response.json();
 
-      if (result.valid && result.discount_percentage) {
+      const resultShipType = (result.shipping_discount_type || "none") as
+        | "none"
+        | "free"
+        | "percent"
+        | "fixed";
+      const resultShipVal = Number(result.shipping_discount_value) || 0;
+      const resultHasShipping = resultShipType !== "none";
+
+      if (
+        result.valid &&
+        (result.discount_percentage > 0 || resultHasShipping)
+      ) {
+        // A regular discount won — clear any previous affiliate attribution
+        // so the order doesn't mistakenly send a rebate to an affiliate.
+        if (affiliateMetaBySeller[pubkey]) {
+          const { [pubkey]: _drop, ...rest } = affiliateMetaBySeller;
+          setAffiliateMetaBySeller(rest);
+        }
         setAppliedDiscounts({
           ...appliedDiscounts,
-          [pubkey]: result.discount_percentage,
+          [pubkey]: Number(result.discount_percentage) || 0,
+        });
+        // Mirror the seller's shipping discount into the per-pubkey state
+        // so CartInvoiceCard can apply it at shipping math time. Always
+        // assign — even "none" — so re-applying a code that *removed* a
+        // prior shipping discount overwrites the previous entry.
+        setAppliedShippingDiscounts({
+          ...appliedShippingDiscounts,
+          [pubkey]: { type: resultShipType, value: resultShipVal },
         });
         setDiscountErrors({ ...discountErrors, [pubkey]: "" });
 
@@ -705,11 +907,76 @@ export default function Component() {
         };
         localStorage.setItem("cartDiscounts", JSON.stringify(discounts));
       } else {
+        // Pass the seller's order currency so the validate endpoint can
+        // reject fixed-amount codes whose currency doesn't match this cart
+        // (e.g. a USD code on a sats invoice).
+        const sellerCurrency =
+          products.find((p) => p.pubkey === pubkey)?.currency || "usd";
+        const affRes = await fetch(
+          `/api/affiliates/validate?sellerPubkey=${pubkey}&code=${encodeURIComponent(
+            code
+          )}&currency=${encodeURIComponent(sellerCurrency)}`
+        );
+        const aff = affRes.ok ? await affRes.json() : null;
+        if (aff?.valid) {
+          let percent = 0;
+          if (aff.buyerDiscountType === "percent") {
+            percent = Number(aff.buyerDiscountValue) || 0;
+          } else if (aff.buyerDiscountType === "fixed") {
+            const sellerSubtotal = getSellerSubtotalInCurrency(pubkey);
+            if (sellerSubtotal > 0) {
+              percent = Math.min(
+                100,
+                (Number(aff.buyerDiscountValue) / sellerSubtotal) * 100
+              );
+            }
+          }
+          setAppliedDiscounts({ ...appliedDiscounts, [pubkey]: percent });
+          // Affiliate codes never carry shipping discounts; clear any
+          // previous shipping discount that was on this seller from a
+          // prior (non-affiliate) code.
+          setAppliedShippingDiscounts((prev) => {
+            const next = { ...prev };
+            delete next[pubkey];
+            return next;
+          });
+          setAffiliateMetaBySeller({
+            ...affiliateMetaBySeller,
+            [pubkey]: {
+              code,
+              codeId: aff.codeId,
+              affiliateId: aff.affiliateId,
+              rebateType: aff.rebateType,
+              rebateValue: Number(aff.rebateValue) || 0,
+            },
+          });
+          setDiscountErrors({ ...discountErrors, [pubkey]: "" });
+          const discounts = getLocalStorageJson<CartDiscountsMap>(
+            "cartDiscounts",
+            {},
+            {
+              removeOnError: true,
+              removeOnValidationError: true,
+              validate: isCartDiscountsMap,
+            }
+          );
+          discounts[pubkey] = { code };
+          localStorage.setItem("cartDiscounts", JSON.stringify(discounts));
+          return;
+        }
         setDiscountErrors({
           ...discountErrors,
           [pubkey]: "Invalid or expired discount code",
         });
         setAppliedDiscounts({ ...appliedDiscounts, [pubkey]: 0 });
+        // Also drop any stale shipping discount tied to this seller so an
+        // expired/exhausted code can't keep waiving shipping after it stops
+        // discounting the product subtotal.
+        setAppliedShippingDiscounts((prev) => {
+          const next = { ...prev };
+          delete next[pubkey];
+          return next;
+        });
       }
     } catch (error) {
       console.error("Failed to apply discount:", error);
@@ -718,13 +985,28 @@ export default function Component() {
         [pubkey]: "Failed to apply discount code",
       });
       setAppliedDiscounts({ ...appliedDiscounts, [pubkey]: 0 });
+      setAppliedShippingDiscounts((prev) => {
+        const next = { ...prev };
+        delete next[pubkey];
+        return next;
+      });
     }
   };
 
   const handleRemoveDiscount = (pubkey: string) => {
     setDiscountCodes({ ...discountCodes, [pubkey]: "" });
     setAppliedDiscounts({ ...appliedDiscounts, [pubkey]: 0 });
+    setAppliedShippingDiscounts((prev) => {
+      const next = { ...prev };
+      delete next[pubkey];
+      return next;
+    });
     setDiscountErrors({ ...discountErrors, [pubkey]: "" });
+    setAffiliateMetaBySeller((prev) => {
+      const next = { ...prev };
+      delete next[pubkey];
+      return next;
+    });
 
     // Remove from localStorage
     const discounts = getLocalStorageJson<CartDiscountsMap>(
@@ -786,40 +1068,42 @@ export default function Component() {
     product: ProductData
   ): Promise<number> => {
     const shippingCost = product.shippingCost ? product.shippingCost : 0;
-    if (
-      product.currency.toLowerCase() === "sats" ||
-      product.currency.toLowerCase() === "sat"
-    ) {
+    if (shippingCost === 0) return 0;
+    // Shipping is denominated in the shipping-tag currency, which may differ
+    // from the product's price currency (e.g. USD product with sats shipping).
+    // Use product.currency only as a fallback for legacy listings without an
+    // explicit shipping currency.
+    const shippingCurrencyRaw =
+      product.shippingCurrency || product.currency || "";
+    const shippingCurrencyLower = shippingCurrencyRaw.toLowerCase();
+    const shippingCurrencyUpper = shippingCurrencyRaw.toUpperCase();
+    if (shippingCurrencyLower === "sats" || shippingCurrencyLower === "sat") {
       return shippingCost;
     }
     let cost = 0;
-    if (!currencySelection.hasOwnProperty(product.currency.toUpperCase())) {
-      throw new Error(`${product.currency} is not a supported currency.`);
-    } else if (
-      currencySelection.hasOwnProperty(product.currency.toUpperCase()) &&
-      product.currency.toLowerCase() !== "sats" &&
-      product.currency.toLowerCase() !== "sat"
-    ) {
+    if (!currencySelection.hasOwnProperty(shippingCurrencyUpper)) {
+      throw new Error(`${shippingCurrencyRaw} is not a supported currency.`);
+    } else if (shippingCurrencyLower === "btc") {
+      cost = shippingCost * 100000000;
+    } else {
       try {
         const currencyData = {
           amount: shippingCost,
-          currency: product.currency,
+          currency: shippingCurrencyRaw,
         };
         const numSats = await getSatoshiValue(currencyData);
         cost = Math.ceil(numSats);
       } catch (err) {
         console.error("ERROR", err);
       }
-    } else if (product.currency.toLowerCase() === "btc") {
-      cost = shippingCost * 100000000;
     }
     return cost;
   };
 
   const cartContent = (
-    <ProtectedRoute>
+    <>
       {!isBeingPaid ? (
-        <div className="flex min-h-screen flex-col bg-white p-4 text-black">
+        <div className="flex min-h-screen w-full flex-col overflow-x-hidden bg-white p-4 text-black">
           <div className="mx-auto w-full max-w-4xl pt-20">
             <div className="mb-8">
               <h1 className="text-4xl font-bold">Shopping Cart</h1>
@@ -1066,48 +1350,97 @@ export default function Component() {
                           ) : (
                             <>
                               <div className="flex gap-2">
-                                <Input
-                                  label="Discount Code"
-                                  placeholder="Enter code"
-                                  value={discountCodes[sellerPubkey] || ""}
-                                  onChange={(e) =>
-                                    setDiscountCodes({
-                                      ...discountCodes,
-                                      [sellerPubkey]:
-                                        e.target.value.toUpperCase(),
-                                    })
-                                  }
-                                  className="flex-1 text-white"
-                                  disabled={appliedDiscounts[sellerPubkey]! > 0}
-                                  isInvalid={!!discountErrors[sellerPubkey]}
-                                  errorMessage={discountErrors[sellerPubkey]}
-                                />
-                                {appliedDiscounts[sellerPubkey]! > 0 ? (
-                                  <Button
-                                    color="warning"
-                                    onClick={() =>
-                                      handleRemoveDiscount(sellerPubkey)
-                                    }
-                                  >
-                                    Remove
-                                  </Button>
-                                ) : (
-                                  <Button
-                                    className={BLUEBUTTONCLASSNAMES}
-                                    onClick={() =>
-                                      handleApplyDiscount(sellerPubkey)
-                                    }
-                                  >
-                                    Apply
-                                  </Button>
-                                )}
+                                {(() => {
+                                  // A code is "active" if EITHER a product
+                                  // percent discount OR a shipping discount
+                                  // applies. The previous check only looked
+                                  // at the product percent, so shipping-only
+                                  // welcome codes validated successfully but
+                                  // never flipped the UI to Applied/Remove —
+                                  // the buyer mashed Apply and assumed
+                                  // nothing happened.
+                                  const pct =
+                                    appliedDiscounts[sellerPubkey] || 0;
+                                  const shipType =
+                                    appliedShippingDiscounts[sellerPubkey]
+                                      ?.type || "none";
+                                  const isApplied =
+                                    pct > 0 || shipType !== "none";
+                                  return (
+                                    <>
+                                      <Input
+                                        label="Discount Code"
+                                        placeholder="Enter code"
+                                        value={
+                                          discountCodes[sellerPubkey] || ""
+                                        }
+                                        onChange={(e) =>
+                                          setDiscountCodes({
+                                            ...discountCodes,
+                                            [sellerPubkey]:
+                                              e.target.value.toUpperCase(),
+                                          })
+                                        }
+                                        className="flex-1 text-white"
+                                        disabled={isApplied}
+                                        isInvalid={
+                                          !!discountErrors[sellerPubkey]
+                                        }
+                                        errorMessage={
+                                          discountErrors[sellerPubkey]
+                                        }
+                                      />
+                                      {isApplied ? (
+                                        <Button
+                                          color="warning"
+                                          onClick={() =>
+                                            handleRemoveDiscount(sellerPubkey)
+                                          }
+                                        >
+                                          Remove
+                                        </Button>
+                                      ) : (
+                                        <Button
+                                          className={BLUEBUTTONCLASSNAMES}
+                                          onClick={() =>
+                                            handleApplyDiscount(sellerPubkey)
+                                          }
+                                        >
+                                          Apply
+                                        </Button>
+                                      )}
+                                    </>
+                                  );
+                                })()}
                               </div>
-                              {appliedDiscounts[sellerPubkey]! > 0 && (
-                                <p className="mt-2 text-sm text-green-600">
-                                  {appliedDiscounts[sellerPubkey]}% discount
-                                  applied to all items from this seller!
-                                </p>
-                              )}
+                              {(() => {
+                                const pct = appliedDiscounts[sellerPubkey] || 0;
+                                const ship =
+                                  appliedShippingDiscounts[sellerPubkey];
+                                const shipType = ship?.type || "none";
+                                if (pct <= 0 && shipType === "none")
+                                  return null;
+                                const shipVal = ship?.value || 0;
+                                const shipLabel =
+                                  shipType === "free"
+                                    ? "free shipping"
+                                    : shipType === "percent"
+                                      ? `${shipVal}% off shipping`
+                                      : shipType === "fixed"
+                                        ? `${shipVal} off shipping`
+                                        : "";
+                                const msg =
+                                  pct > 0 && shipType !== "none"
+                                    ? `${pct}% discount + ${shipLabel} applied to this seller!`
+                                    : pct > 0
+                                      ? `${pct}% discount applied to all items from this seller!`
+                                      : `${shipLabel.charAt(0).toUpperCase()}${shipLabel.slice(1)} applied to this seller!`;
+                                return (
+                                  <p className="mt-2 text-sm text-green-600">
+                                    {msg}
+                                  </p>
+                                );
+                              })()}
                             </>
                           )}
                         </div>
@@ -1279,7 +1612,7 @@ export default function Component() {
                   onClick={() =>
                     router.push(
                       sfSellerPubkey && sfShopSlug
-                        ? `/shop/${sfShopSlug}`
+                        ? `/stall/${sfShopSlug}`
                         : "/marketplace"
                     )
                   }
@@ -1291,7 +1624,7 @@ export default function Component() {
           </div>
         </div>
       ) : (
-        <div className="flex min-h-screen w-full bg-white text-black sm:items-center sm:justify-center">
+        <div className="flex min-h-screen w-full overflow-x-hidden bg-white text-black sm:items-center sm:justify-center">
           <div className="mx-auto flex w-full flex-col pt-20">
             <div className="flex flex-col items-center">
               <CartInvoiceCard
@@ -1301,7 +1634,9 @@ export default function Component() {
                 totalCostsInSats={totalCostsInSats}
                 subtotalCost={subtotal}
                 appliedDiscounts={appliedDiscounts}
+                appliedShippingDiscounts={appliedShippingDiscounts}
                 discountCodes={discountCodes}
+                affiliateMetaBySeller={affiliateMetaBySeller}
                 shopProfiles={shopContext.shopData}
                 onBackToCart={toggleCheckout}
                 setInvoiceIsPaid={setInvoiceIsPaid}
@@ -1386,12 +1721,12 @@ export default function Component() {
           </Modal>
         </>
       ) : null}
-    </ProtectedRoute>
+    </>
   );
 
   if (sfSellerPubkey) {
     return (
-      <StorefrontThemeWrapper sellerPubkey={sfSellerPubkey}>
+      <StorefrontThemeWrapper sellerPubkey={sfSellerPubkey} renderChrome={true}>
         {cartContent}
       </StorefrontThemeWrapper>
     );

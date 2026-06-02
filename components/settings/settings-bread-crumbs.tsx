@@ -3,13 +3,15 @@ import { useRouter } from "next/router";
 
 const pathMap: { [key: string]: string } = {
   settings: "Settings",
-  "user-profile": "User Profile",
-  preferences: "Preferences",
-  "shop-profile": "Shop Profile",
+  "market-profile": "Market Profile",
+  profile: "Profile",
+  account: "Account Settings & Preferences",
+  "shop-profile": "Stall Profile",
+  stall: "Market Stall",
   community: "Community Management",
-  nwc: "Nostr Wallet Connect",
   "api-keys": "API Keys",
   "email-flows": "Email Flows",
+  payments: "Payments",
 };
 
 export const SettingsBreadCrumbs = () => {
@@ -22,12 +24,13 @@ export const SettingsBreadCrumbs = () => {
         key="foreground"
         color="success"
         classNames={{
-          base: "pb-2",
+          base: "pb-2 w-full min-w-0",
+          list: "flex-wrap",
         }}
       >
         {path.map((p, i) => {
           const itemClassName =
-            "ml-2 text-light-text text-2xl font-bold" +
+            "ml-2 text-light-text text-2xl font-bold whitespace-normal break-words" +
             (i !== path.length - 1 ? " opacity-50 hover:opacity-100" : "");
           return (
             <BreadcrumbItem
@@ -36,6 +39,7 @@ export const SettingsBreadCrumbs = () => {
                 router.push(`/${p}`);
               }}
               classNames={{
+                base: "min-w-0",
                 item: itemClassName,
                 separator: "text-dark-bg text-2xl",
               }}

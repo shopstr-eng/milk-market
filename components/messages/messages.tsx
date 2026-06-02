@@ -25,7 +25,13 @@ import SignInModal from "../sign-in/SignInModal";
 import { WHITEBUTTONCLASSNAMES } from "@/utils/STATIC-VARIABLES";
 import { createNip98AuthorizationHeader } from "@/utils/nostr/nip98-auth";
 
-const Messages = ({ isPayment }: { isPayment: boolean }) => {
+const Messages = ({
+  isPayment,
+  filterByCounterpartyPubkey,
+}: {
+  isPayment: boolean;
+  filterByCounterpartyPubkey?: string;
+}) => {
   const router = useRouter();
   const { isOpen, onOpen, onClose } = useDisclosure();
   const chatsContext = useContext(ChatsContext);
@@ -87,21 +93,25 @@ const Messages = ({ isPayment }: { isPayment: boolean }) => {
         const decryptedChats = await getDecryptedChatsFromContext();
         const passedNPubkey = router.query.pk ? router.query.pk : null;
         if (passedNPubkey) {
-          const pubkey = decryptNpub(passedNPubkey as string) as string;
-          if (!decryptedChats.has(pubkey)) {
-            decryptedChats.set(pubkey as string, {
-              unreadCount: 0,
-              decryptedChat: [],
-            });
-          }
-          enterChat(pubkey);
-          const productTitle = router.query.productTitle as string | undefined;
-          const productUrl = router.query.productUrl as string | undefined;
-          if (productTitle) {
-            const draftText = productUrl
-              ? `Re: "${productTitle}" — ${productUrl}\n\n`
-              : `Re: "${productTitle}"\n\n`;
-            setInitialMessage(draftText);
+          const pubkey = decryptNpub(passedNPubkey as string);
+          if (pubkey) {
+            if (!decryptedChats.has(pubkey)) {
+              decryptedChats.set(pubkey, {
+                unreadCount: 0,
+                decryptedChat: [],
+              });
+            }
+            enterChat(pubkey);
+            const productTitle = router.query.productTitle as
+              | string
+              | undefined;
+            const productUrl = router.query.productUrl as string | undefined;
+            if (productTitle) {
+              const draftText = productUrl
+                ? `Re: "${productTitle}" — ${productUrl}\n\n`
+                : `Re: "${productTitle}"\n\n`;
+              setInitialMessage(draftText);
+            }
           }
         }
         setChatsMap(decryptedChats);
@@ -204,7 +214,12 @@ const Messages = ({ isPayment }: { isPayment: boolean }) => {
         }
       }
       if (decryptedChat.length > 0) {
-        decryptedChats.set(chatPubkey, { unreadCount, decryptedChat });
+        if (
+          !filterByCounterpartyPubkey ||
+          chatPubkey === filterByCounterpartyPubkey
+        ) {
+          decryptedChats.set(chatPubkey, { unreadCount, decryptedChat });
+        }
       }
     }
     return decryptedChats;

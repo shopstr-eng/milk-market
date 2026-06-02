@@ -389,14 +389,24 @@ async function initializeTables(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_config_events_pubkey ON config_events(pubkey);
 
       -- Discount codes table
+      -- discount_percentage may be 0 when the code only offers a shipping
+      -- discount (shipping_discount_type != 'none'). The composite "must
+      -- discount something" check is enforced below.
       CREATE TABLE IF NOT EXISTS discount_codes (
           id SERIAL PRIMARY KEY,
           code TEXT NOT NULL,
           pubkey TEXT NOT NULL,
-          discount_percentage DECIMAL(5,2) NOT NULL CHECK (discount_percentage > 0 AND discount_percentage <= 100),
+          discount_percentage DECIMAL(5,2) NOT NULL DEFAULT 0 CHECK (discount_percentage >= 0 AND discount_percentage <= 100),
+          shipping_discount_type TEXT NOT NULL DEFAULT 'none' CHECK (shipping_discount_type IN ('none','percent','fixed','free')),
+          shipping_discount_value DECIMAL(12,2) NOT NULL DEFAULT 0 CHECK (shipping_discount_value >= 0),
           expiration BIGINT,
+          max_uses INTEGER,
+          times_used INTEGER NOT NULL DEFAULT 0,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          UNIQUE(code, pubkey)
+          UNIQUE(code, pubkey),
+          CONSTRAINT discount_codes_has_discount CHECK (
+            discount_percentage > 0 OR shipping_discount_type <> 'none'
+          )
       );
 
       CREATE INDEX IF NOT EXISTS idx_discount_codes_pubkey ON discount_codes(pubkey);
@@ -460,6 +470,13 @@ async function initializeTables(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_custom_domains_domain ON custom_domains(domain);
       CREATE INDEX IF NOT EXISTS idx_custom_domains_pubkey ON custom_domains(pubkey);
 
+      ALTER TABLE custom_domains ADD COLUMN IF NOT EXISTS domain_type TEXT DEFAULT 'subdomain';
+      ALTER TABLE custom_domains ADD COLUMN IF NOT EXISTS verification_token TEXT;
+      ALTER TABLE custom_domains ADD COLUMN IF NOT EXISTS tls_status TEXT DEFAULT 'pending_dns';
+      ALTER TABLE custom_domains ADD COLUMN IF NOT EXISTS attached_at TIMESTAMP;
+      ALTER TABLE custom_domains ADD COLUMN IF NOT EXISTS admin_notified_at TIMESTAMP;
+      CREATE INDEX IF NOT EXISTS idx_custom_domains_tls_status ON custom_domains(tls_status);
+
       -- Subscriptions table for recurring product subscriptions
       CREATE TABLE IF NOT EXISTS subscriptions (
           id SERIAL PRIMARY KEY,
@@ -477,7 +494,7 @@ async function initializeTables(): Promise<void> {
           subscription_price NUMERIC(12,2) NOT NULL,
           currency TEXT NOT NULL DEFAULT 'usd',
           shipping_address JSONB,
-          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'canceled')),
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('pending', 'incomplete', 'incomplete_expired', 'trialing', 'active', 'past_due', 'canceled', 'unpaid', 'paused')),
           next_billing_date TIMESTAMP,
           next_shipping_date TIMESTAMP,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -777,6 +794,76 @@ async function initializeTables(): Promise<void> {
       BEGIN
         IF NOT EXISTS (
           SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'discount_codes' AND column_name = 'max_uses'
+        ) THEN
+          ALTER TABLE discount_codes ADD COLUMN max_uses INTEGER;
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'discount_codes' AND column_name = 'times_used'
+        ) THEN
+          ALTER TABLE discount_codes ADD COLUMN times_used INTEGER NOT NULL DEFAULT 0;
+        END IF;
+        -- Shipping discount columns (free / percent-off / fixed-amount-off
+        -- shipping, layered on top of the existing product percentage).
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'discount_codes' AND column_name = 'shipping_discount_type'
+        ) THEN
+          ALTER TABLE discount_codes
+            ADD COLUMN shipping_discount_type TEXT NOT NULL DEFAULT 'none'
+            CHECK (shipping_discount_type IN ('none','percent','fixed','free'));
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'discount_codes' AND column_name = 'shipping_discount_value'
+        ) THEN
+          ALTER TABLE discount_codes
+            ADD COLUMN shipping_discount_value DECIMAL(12,2) NOT NULL DEFAULT 0
+            CHECK (shipping_discount_value >= 0);
+        END IF;
+        -- Relax the original "discount_percentage > 0" CHECK so a code can
+        -- exist as shipping-discount-only (0% product, free/discounted
+        -- shipping). The composite "must discount something" constraint is
+        -- enforced by discount_codes_has_discount below.
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'discount_codes_discount_percentage_check'
+        ) THEN
+          ALTER TABLE discount_codes
+            DROP CONSTRAINT discount_codes_discount_percentage_check;
+          ALTER TABLE discount_codes
+            ADD CONSTRAINT discount_codes_discount_percentage_check
+            CHECK (discount_percentage >= 0 AND discount_percentage <= 100);
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'discount_codes_has_discount'
+        ) THEN
+          -- NOT VALID: enforce the "must discount something" rule for every
+          -- INSERT/UPDATE going forward, but skip the one-time scan of
+          -- existing rows. Production has pre-existing rows that predate this
+          -- composite constraint (e.g. an early WELCOME* row that was written
+          -- before the popup learned about shipping discounts); without NOT
+          -- VALID the ALTER aborts the entire init script, the
+          -- shipping_discount_type column never gets added, and every popup
+          -- submission then 500s with "column does not exist". Grandfathering
+          -- those rows is the right call: the popup capture endpoint won't
+          -- ever read them, and a future cleanup can run VALIDATE CONSTRAINT
+          -- discount_codes_has_discount after the bad rows are reconciled.
+          ALTER TABLE discount_codes
+            ADD CONSTRAINT discount_codes_has_discount CHECK (
+              discount_percentage > 0 OR shipping_discount_type <> 'none'
+            ) NOT VALID;
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
           WHERE table_name = 'email_flows' AND column_name = 'from_name'
         ) THEN
           ALTER TABLE email_flows ADD COLUMN from_name TEXT;
@@ -817,6 +904,165 @@ async function initializeTables(): Promise<void> {
       );
       CREATE INDEX IF NOT EXISTS idx_inventory_log_product_id ON inventory_log(product_id);
       CREATE INDEX IF NOT EXISTS idx_inventory_log_order_id ON inventory_log(order_id);
+
+      -- Affiliate program tables (mirrors db/schema.sql).
+      CREATE TABLE IF NOT EXISTS affiliates (
+        id SERIAL PRIMARY KEY,
+        seller_pubkey TEXT NOT NULL,
+        name TEXT NOT NULL,
+        email TEXT,
+        affiliate_pubkey TEXT,
+        invite_token TEXT NOT NULL UNIQUE,
+        invite_claimed_at TIMESTAMP,
+        lightning_address TEXT,
+        stripe_account_id TEXT,
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_affiliates_seller_pubkey ON affiliates(seller_pubkey);
+      CREATE INDEX IF NOT EXISTS idx_affiliates_invite_token ON affiliates(invite_token);
+      CREATE INDEX IF NOT EXISTS idx_affiliates_affiliate_pubkey ON affiliates(affiliate_pubkey);
+
+      CREATE TABLE IF NOT EXISTS affiliate_codes (
+        id SERIAL PRIMARY KEY,
+        affiliate_id INTEGER NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
+        seller_pubkey TEXT NOT NULL,
+        code TEXT NOT NULL,
+        rebate_type TEXT NOT NULL CHECK (rebate_type IN ('percent', 'fixed')),
+        rebate_value NUMERIC(12,2) NOT NULL CHECK (rebate_value >= 0),
+        buyer_discount_type TEXT NOT NULL DEFAULT 'percent' CHECK (buyer_discount_type IN ('percent', 'fixed')),
+        buyer_discount_value NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (buyer_discount_value >= 0),
+        currency TEXT,
+        payout_schedule TEXT NOT NULL DEFAULT 'every_sale' CHECK (payout_schedule IN ('every_sale', 'daily', 'weekly', 'monthly')),
+        expiration BIGINT,
+        max_uses INTEGER,
+        times_used INTEGER NOT NULL DEFAULT 0,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(seller_pubkey, code)
+      );
+      CREATE INDEX IF NOT EXISTS idx_affiliate_codes_seller_pubkey ON affiliate_codes(seller_pubkey);
+      CREATE INDEX IF NOT EXISTS idx_affiliate_codes_affiliate_id ON affiliate_codes(affiliate_id);
+      CREATE INDEX IF NOT EXISTS idx_affiliate_codes_code ON affiliate_codes(code);
+
+      CREATE TABLE IF NOT EXISTS affiliate_referrals (
+        id SERIAL PRIMARY KEY,
+        affiliate_id INTEGER NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
+        code_id INTEGER NOT NULL REFERENCES affiliate_codes(id) ON DELETE CASCADE,
+        seller_pubkey TEXT NOT NULL,
+        order_id TEXT NOT NULL,
+        payment_rail TEXT NOT NULL CHECK (payment_rail IN ('stripe', 'bitcoin')),
+        gross_subtotal_smallest NUMERIC(20,0) NOT NULL,
+        buyer_discount_smallest NUMERIC(20,0) NOT NULL DEFAULT 0,
+        rebate_smallest NUMERIC(20,0) NOT NULL DEFAULT 0,
+        currency TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'payable', 'paid', 'cancelled')),
+        payout_id INTEGER,
+        realtime_transfer_ref TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(order_id, code_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_affiliate_referrals_affiliate_id ON affiliate_referrals(affiliate_id);
+      CREATE INDEX IF NOT EXISTS idx_affiliate_referrals_seller_pubkey ON affiliate_referrals(seller_pubkey);
+      CREATE INDEX IF NOT EXISTS idx_affiliate_referrals_status ON affiliate_referrals(status);
+      CREATE INDEX IF NOT EXISTS idx_affiliate_referrals_order_id ON affiliate_referrals(order_id);
+
+      CREATE TABLE IF NOT EXISTS affiliate_payouts (
+        id SERIAL PRIMARY KEY,
+        affiliate_id INTEGER NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
+        seller_pubkey TEXT NOT NULL,
+        method TEXT NOT NULL CHECK (method IN ('stripe', 'lightning', 'manual')),
+        amount_smallest NUMERIC(20,0) NOT NULL,
+        currency TEXT NOT NULL,
+        external_ref TEXT,
+        note TEXT,
+        status TEXT NOT NULL DEFAULT 'paid' CHECK (status IN ('paid', 'failed')),
+        paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_affiliate_payouts_affiliate_id ON affiliate_payouts(affiliate_id);
+      CREATE INDEX IF NOT EXISTS idx_affiliate_payouts_seller_pubkey ON affiliate_payouts(seller_pubkey);
+    `);
+
+    // -----------------------------------------------------------------
+    // Idempotent affiliate-program migrations. This block mirrors the
+    // DO $aff_migrate$ block in db/schema.sql so that environments which
+    // bootstrap from this code path (rather than running schema.sql
+    // directly) stay in sync.  Safe to re-run.
+    // -----------------------------------------------------------------
+    await client.query(`
+      DO $aff_migrate_inline$
+      BEGIN
+        EXECUTE 'UPDATE affiliate_codes SET payout_schedule = ''monthly'' WHERE payout_schedule IN (''every_sale'', ''daily'')';
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'affiliate_codes_payout_schedule_check'
+        ) THEN
+          ALTER TABLE affiliate_codes DROP CONSTRAINT affiliate_codes_payout_schedule_check;
+        END IF;
+        ALTER TABLE affiliate_codes
+          ADD CONSTRAINT affiliate_codes_payout_schedule_check
+          CHECK (payout_schedule IN ('weekly', 'biweekly', 'monthly'));
+        ALTER TABLE affiliate_codes ALTER COLUMN payout_schedule SET DEFAULT 'monthly';
+
+        ALTER TABLE affiliate_referrals
+          ADD COLUMN IF NOT EXISTS refunded_smallest NUMERIC(20,0) NOT NULL DEFAULT 0;
+        ALTER TABLE affiliate_referrals
+          ADD COLUMN IF NOT EXISTS refund_event_ref TEXT;
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'affiliate_referrals_status_check'
+        ) THEN
+          ALTER TABLE affiliate_referrals DROP CONSTRAINT affiliate_referrals_status_check;
+        END IF;
+        ALTER TABLE affiliate_referrals
+          ADD CONSTRAINT affiliate_referrals_status_check
+          CHECK (status IN ('pending', 'payable', 'paid', 'cancelled', 'refunded'));
+
+        ALTER TABLE affiliates
+          ADD COLUMN IF NOT EXISTS payouts_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+        ALTER TABLE affiliates
+          ADD COLUMN IF NOT EXISTS payout_failure_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE affiliates
+          ADD COLUMN IF NOT EXISTS last_payout_failure_at TIMESTAMP;
+        ALTER TABLE affiliates
+          ADD COLUMN IF NOT EXISTS last_payout_failure_reason TEXT;
+        ALTER TABLE affiliates
+          ADD COLUMN IF NOT EXISTS email_notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+        ALTER TABLE affiliates
+          ADD COLUMN IF NOT EXISTS stripe_charges_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE affiliates
+          ADD COLUMN IF NOT EXISTS stripe_payouts_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE affiliates
+          ADD COLUMN IF NOT EXISTS stripe_onboarding_complete BOOLEAN NOT NULL DEFAULT FALSE;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uniq_affiliate_codes_seller_upper_code
+          ON affiliate_codes (seller_pubkey, UPPER(code));
+
+        CREATE TABLE IF NOT EXISTS affiliate_clicks (
+            id BIGSERIAL PRIMARY KEY,
+            seller_pubkey TEXT NOT NULL,
+            code TEXT NOT NULL,
+            landing_path TEXT,
+            referer_host TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_affiliate_clicks_seller_code
+          ON affiliate_clicks(seller_pubkey, code);
+        CREATE INDEX IF NOT EXISTS idx_affiliate_clicks_created_at
+          ON affiliate_clicks(created_at);
+      END
+      $aff_migrate_inline$;
+
+      DO $sub_migrate_inline$
+      BEGIN
+        ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_status_check;
+        ALTER TABLE subscriptions
+          ADD CONSTRAINT subscriptions_status_check
+          CHECK (status IN ('pending', 'incomplete', 'incomplete_expired', 'trialing', 'active', 'past_due', 'canceled', 'unpaid', 'paused'));
+      END
+      $sub_migrate_inline$;
     `);
 
     tablesInitialized = true;
@@ -831,7 +1077,7 @@ async function initializeTables(): Promise<void> {
 }
 
 // Map event kinds to table names
-function getTableForKind(kind: number): string | null {
+export function getTableForKind(kind: number): string | null {
   // Products
   if (kind === 30402) return "product_events";
 
@@ -874,14 +1120,14 @@ function getTableForEvent(event: NostrEvent): string | null {
 }
 
 // Helper function to check if event kind should only keep latest per pubkey
-function shouldKeepOnlyLatest(kind: number): boolean {
+export function shouldKeepOnlyLatest(kind: number): boolean {
   // Wallet config (17375), wallet state (37375), relay list (10002), blossom servers (10063)
   // User profile (0), shop profile (30019), community definition (34550)
   return [17375, 37375, 10002, 10063, 0, 30019, 34550].includes(kind);
 }
 
 // Helper function to check if event is a review (needs special handling per product)
-function isReviewEvent(kind: number): boolean {
+export function isReviewEvent(kind: number): boolean {
   return kind === 31555;
 }
 
@@ -1370,30 +1616,35 @@ export async function deleteCachedEventsByIds(
     // version that may already exist (e.g. an edit published before the old
     // one was explicitly removed).
     await client.query(
-      `DELETE FROM product_events
-       WHERE id = ANY($1)
-          OR (
-            kind = 30402
-            AND EXISTS (
-              SELECT 1
-              FROM product_events ref,
-              LATERAL (
-                SELECT elem->>'1' AS d_tag
-                FROM jsonb_array_elements(ref.tags) elem
-                WHERE elem->>'0' = 'd'
-                LIMIT 1
-              ) ref_d
-              WHERE ref.id = ANY($1)
-                AND ref.pubkey = product_events.pubkey
-                AND product_events.created_at < ref.created_at
-                AND EXISTS (
-                  SELECT 1
-                  FROM jsonb_array_elements(product_events.tags) elem
-                  WHERE elem->>'0' = 'd'
-                    AND elem->>'1' = ref_d.d_tag
-                )
-            )
-          )`,
+      `WITH refs AS (
+         SELECT
+           ref.pubkey,
+           ref.created_at,
+           d.d_tag
+         FROM product_events ref
+         CROSS JOIN LATERAL (
+           SELECT elem->>1 AS d_tag
+           FROM jsonb_array_elements(ref.tags) elem
+           WHERE elem->>0 = 'd'
+           LIMIT 1
+         ) d
+         WHERE ref.id = ANY($1)
+       )
+       DELETE FROM product_events pe
+       WHERE pe.id = ANY($1)
+         OR EXISTS (
+           SELECT 1
+           FROM refs
+           WHERE pe.kind = 30402
+             AND pe.pubkey = refs.pubkey
+             AND pe.created_at < refs.created_at
+             AND EXISTS (
+               SELECT 1
+               FROM jsonb_array_elements(pe.tags) elem
+               WHERE elem->>0 = 'd'
+                 AND elem->>1 = refs.d_tag
+             )
+         )`,
       [eventIds]
     );
 
@@ -2319,13 +2570,23 @@ export async function fetchBlossomConfigFromDb(
   return fetchCachedEvents(10063, { pubkey });
 }
 
+// Shipping discount type — see `discount_codes.shipping_discount_type` CHECK.
+//   - 'none'    : code has no shipping discount (regular product-only code)
+//   - 'free'    : shipping is waived for that seller's portion of the order
+//   - 'percent' : `shipping_discount_value` % off shipping (0-100)
+//   - 'fixed'   : `shipping_discount_value` units off shipping, denominated
+//                 in the cart's display currency (or sats for sats carts)
+export type ShippingDiscountType = "none" | "free" | "percent" | "fixed";
+
 // Add discount code
 export async function addDiscountCode(
   code: string,
   pubkey: string,
   discountPercentage: number,
   expiration?: number,
-  maxUses?: number
+  maxUses?: number,
+  shippingDiscountType: ShippingDiscountType = "none",
+  shippingDiscountValue: number = 0
 ): Promise<void> {
   const dbPool = getDbPool();
   let client;
@@ -2333,18 +2594,26 @@ export async function addDiscountCode(
   try {
     client = await dbPool.connect();
     const query = {
-      text: `INSERT INTO discount_codes (code, pubkey, discount_percentage, expiration, max_uses)
-             VALUES ($1, $2, $3, $4, $5)
+      text: `INSERT INTO discount_codes (
+               code, pubkey, discount_percentage, expiration, max_uses,
+               shipping_discount_type, shipping_discount_value
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (code, pubkey) DO UPDATE SET
                discount_percentage = EXCLUDED.discount_percentage,
                expiration = EXCLUDED.expiration,
-               max_uses = EXCLUDED.max_uses`,
+               max_uses = EXCLUDED.max_uses,
+               shipping_discount_type = EXCLUDED.shipping_discount_type,
+               shipping_discount_value = EXCLUDED.shipping_discount_value`,
       values: [
         code,
         pubkey,
         discountPercentage,
-        expiration || null,
+        expiration ?? null,
         maxUses ?? null,
+        shippingDiscountType,
+        // 'free' codes ignore value; normalize to 0 so the row is consistent.
+        shippingDiscountType === "free" ? 0 : shippingDiscountValue,
       ] as any[],
     };
     await client.query(query);
@@ -2366,6 +2635,8 @@ export async function getDiscountCodesByPubkey(pubkey: string): Promise<
     expiration: number | null;
     max_uses: number | null;
     times_used: number;
+    shipping_discount_type: ShippingDiscountType;
+    shipping_discount_value: number;
   }>
 > {
   const dbPool = getDbPool();
@@ -2374,10 +2645,23 @@ export async function getDiscountCodesByPubkey(pubkey: string): Promise<
   try {
     client = await dbPool.connect();
     const result = await client.query(
-      `SELECT code, discount_percentage, expiration, max_uses, times_used FROM discount_codes WHERE pubkey = $1 ORDER BY created_at DESC`,
+      `SELECT code, discount_percentage, expiration, max_uses, times_used,
+              shipping_discount_type, shipping_discount_value
+         FROM discount_codes
+        WHERE pubkey = $1
+        ORDER BY created_at DESC`,
       [pubkey]
     );
-    return result.rows;
+    return result.rows.map((row) => ({
+      code: row.code,
+      discount_percentage: Number(row.discount_percentage),
+      expiration: row.expiration === null ? null : Number(row.expiration),
+      max_uses: row.max_uses === null ? null : Number(row.max_uses),
+      times_used: Number(row.times_used ?? 0),
+      shipping_discount_type:
+        (row.shipping_discount_type as ShippingDiscountType) || "none",
+      shipping_discount_value: Number(row.shipping_discount_value ?? 0),
+    }));
   } catch (error) {
     console.error("Failed to fetch discount codes:", error);
     return [];
@@ -2388,27 +2672,57 @@ export async function getDiscountCodesByPubkey(pubkey: string): Promise<
   }
 }
 
+// Strip Unicode invisibles that Postgres BTRIM doesn't catch — NBSP, the
+// narrow/figure no-break spaces, zero-width spaces/joiners, word joiner,
+// and BOM. These routinely slip in when a buyer copy/pastes a welcome code
+// out of an email or popup, and otherwise cause the case-insensitive
+// trim-tolerant lookup below to silently miss. Exported for parity with
+// any future call sites that look codes up by `code`.
+export function normalizeDiscountCode(code: string): string {
+  if (typeof code !== "string") return code;
+  return code.replace(/[\u00A0\u2007\u202F\u200B-\u200D\u2060\uFEFF]/g, "");
+}
+
 // Validate and get discount code
 export async function validateDiscountCode(
   code: string,
   pubkey: string
-): Promise<{ valid: boolean; discount_percentage?: number }> {
+): Promise<{
+  valid: boolean;
+  discount_percentage?: number;
+  shipping_discount_type?: ShippingDiscountType;
+  shipping_discount_value?: number;
+}> {
   const dbPool = getDbPool();
   let client;
 
   try {
     client = await dbPool.connect();
+    // Case-insensitive + whitespace-tolerant match: sellers issue codes in
+    // mixed case (e.g. WELCOMEABC123) and buyers often type them with
+    // different casing or with stray spaces. Comparing on UPPER(TRIM(...))
+    // on both sides avoids false "invalid code" failures.
+    const normalizedCode = normalizeDiscountCode(code);
     const result = await client.query(
-      `SELECT discount_percentage, expiration, max_uses, times_used FROM discount_codes WHERE code = $1 AND pubkey = $2`,
-      [code, pubkey]
+      `SELECT discount_percentage, expiration, max_uses, times_used,
+              shipping_discount_type, shipping_discount_value
+       FROM discount_codes
+       WHERE UPPER(BTRIM(code)) = UPPER(BTRIM($1)) AND pubkey = $2`,
+      [normalizedCode, pubkey]
     );
 
     if (result.rows.length === 0) {
       return { valid: false };
     }
 
-    const { discount_percentage, expiration, max_uses, times_used } =
-      result.rows[0];
+    const {
+      discount_percentage,
+      expiration,
+      max_uses,
+      times_used,
+      shipping_discount_type,
+      shipping_discount_value,
+    } = result.rows[0];
 
     if (expiration && Date.now() / 1000 > expiration) {
       return { valid: false };
@@ -2418,7 +2732,13 @@ export async function validateDiscountCode(
       return { valid: false };
     }
 
-    return { valid: true, discount_percentage };
+    return {
+      valid: true,
+      discount_percentage: Number(discount_percentage),
+      shipping_discount_type:
+        (shipping_discount_type as ShippingDiscountType) || "none",
+      shipping_discount_value: Number(shipping_discount_value ?? 0),
+    };
   } catch (error) {
     console.error("Failed to validate discount code:", error);
     return { valid: false };
@@ -2437,9 +2757,14 @@ export async function markDiscountCodeUsed(
   let client;
   try {
     client = await dbPool.connect();
+    // Use the same invisibles-stripping normalization that validation uses
+    // so a copy/pasted code that validated successfully also consumes a use.
+    // Otherwise a single-use code with NBSP/zero-width chars would validate
+    // but never decrement `times_used`, letting the same code be reused.
     await client.query(
-      `UPDATE discount_codes SET times_used = times_used + 1 WHERE code = $1 AND pubkey = $2`,
-      [code, pubkey]
+      `UPDATE discount_codes SET times_used = times_used + 1
+       WHERE UPPER(BTRIM(code)) = UPPER(BTRIM($1)) AND pubkey = $2`,
+      [normalizeDiscountCode(code), pubkey]
     );
   } catch (error) {
     console.error("Failed to mark discount code used:", error);
@@ -2509,6 +2834,45 @@ export async function savePopupEmailCapture(
   }
 }
 
+export interface PopupEmailCaptureRow {
+  email: string;
+  phone: string | null;
+  discount_code: string;
+  discount_percentage: number;
+  created_at: string;
+  times_used: number;
+}
+
+export async function getPopupEmailCapturesBySeller(
+  sellerPubkey: string
+): Promise<PopupEmailCaptureRow[]> {
+  const dbPool = getDbPool();
+  let client;
+  try {
+    client = await dbPool.connect();
+    const result = await client.query(
+      `SELECT p.email,
+              p.phone,
+              p.discount_code,
+              p.discount_percentage,
+              p.created_at,
+              COALESCE(d.times_used, 0) AS times_used
+         FROM popup_email_captures p
+         LEFT JOIN discount_codes d
+           ON d.code = p.discount_code AND d.pubkey = p.seller_pubkey
+        WHERE p.seller_pubkey = $1
+        ORDER BY p.created_at DESC`,
+      [sellerPubkey]
+    );
+    return result.rows as PopupEmailCaptureRow[];
+  } catch (error) {
+    console.error("Failed to list popup email captures:", error);
+    return [];
+  } finally {
+    if (client) client.release();
+  }
+}
+
 export async function getPopupEmailCapture(
   sellerPubkey: string,
   email: string
@@ -2524,6 +2888,31 @@ export async function getPopupEmailCapture(
     return result.rows.length > 0 ? result.rows[0] : null;
   } catch (error) {
     console.error("Failed to get popup email capture:", error);
+    return null;
+  } finally {
+    if (client) client.release();
+  }
+}
+
+// Lookup an existing popup capture by phone number so the welcome-code
+// endpoint can also block buyers who already redeemed using the same phone
+// (even if they enter a different email address). Returns null on miss or
+// query error so callers can fail open and still validate by email.
+export async function getPopupEmailCaptureByPhone(
+  sellerPubkey: string,
+  phone: string
+): Promise<{ discount_code: string; discount_percentage: number } | null> {
+  const dbPool = getDbPool();
+  let client;
+  try {
+    client = await dbPool.connect();
+    const result = await client.query(
+      `SELECT discount_code, discount_percentage FROM popup_email_captures WHERE seller_pubkey = $1 AND phone = $2 LIMIT 1`,
+      [sellerPubkey, phone]
+    );
+    return result.rows.length > 0 ? result.rows[0] : null;
+  } catch (error) {
+    console.error("Failed to get popup email capture by phone:", error);
     return null;
   } finally {
     if (client) client.release();
@@ -3735,7 +4124,7 @@ export async function closeDbPool(): Promise<void> {
   }
 }
 
-function profileNameToSlug(name: string): string {
+export function profileNameToSlug(name: string): string {
   if (!name) return "";
   return name
     .trim()

@@ -247,9 +247,9 @@ export default function ProductCard({
               </div>
             </div>
 
-            {/* Status badges - Active only shown on /my-listings */}
+            {/* Status badges - Active only shown on Market Stall */}
             {(isExpired ||
-              router.pathname === "/my-listings" ||
+              router.pathname === "/settings/stall" ||
               productData.status === "sold" ||
               productData.status === "soon") && (
               <div className="flex items-center gap-2">
@@ -258,7 +258,7 @@ export default function ProductCard({
                     Outdated
                   </Chip>
                 )}
-                {router.pathname === "/my-listings" &&
+                {router.pathname === "/settings/stall" &&
                   productData.status === "active" && (
                     <Chip className="flex-shrink-0 border-2 border-black bg-green-500 text-xs font-bold text-white">
                       Active
@@ -290,7 +290,7 @@ export default function ProductCard({
           </>
         )}
 
-        {/* Seller – supporting text */}
+        {/* Vendor – supporting text */}
         <div
           className="mb-2"
           data-profile-dropdown
@@ -303,7 +303,7 @@ export default function ProductCard({
             dropDownKeys={
               productData.pubkey === userPubkey
                 ? ["shop_profile"]
-                : ["shop", "storefront", "inquiry", "copy_npub"]
+                : ["shop", "inquiry", "copy_npub"]
             }
             bg="light"
           />
@@ -355,7 +355,7 @@ export default function ProductCard({
   );
 
   return (
-    <div className="shadow-neo active:shadow-neo flex w-full max-w-sm cursor-pointer flex-col overflow-hidden rounded-md border-4 border-black bg-white transition-transform duration-200 hover:-translate-y-1 hover:shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] active:translate-y-0">
+    <div className="shadow-neo active:shadow-neo flex w-full max-w-full min-w-0 cursor-pointer flex-col overflow-hidden rounded-md border-4 border-black bg-white transition-transform duration-200 hover:-translate-y-1 hover:shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] active:translate-y-0 sm:max-w-sm">
       <div className="w-full overflow-hidden rounded-2xl">{content}</div>
       <RawEventModal
         isOpen={showRawEventModal}

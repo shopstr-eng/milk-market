@@ -4,8 +4,8 @@
 # Next.js 16 requires Node.js 22+. The autoscale runtime container's default
 # `node` on PATH can be an older version (we've observed v18.12.1), which
 # breaks Next's internal AsyncLocalStorage.snapshot() calls and crashes every
-# request. We explicitly locate the Node 22 binary that the `nodejs-22` Nix
-# module provides and use it directly.
+# request. We explicitly locate a Node 22 binary that the `nodejs-22` Nix
+# module provides (or that we bundled at build time) and use it directly.
 
 set -e
 

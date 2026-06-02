@@ -1,7 +1,7 @@
 import { ShippingOptionsType } from "@/utils/STATIC-VARIABLES";
 import { calculateTotalCost } from "@/components/utility-components/display-monetary-info";
 import { parseShippingTag } from "@/utils/parsers/product-tag-helpers";
-import { NostrEvent } from "@/utils/types/types";
+import { NostrEvent, StorefrontProductPageConfig } from "@/utils/types/types";
 
 export type ProductData = {
   id: string;
@@ -17,6 +17,7 @@ export type ProductData = {
   currency: string;
   shippingType?: ShippingOptionsType;
   shippingCost?: number;
+  shippingCurrency?: string;
   totalCost: number;
   d?: string;
   contentWarning?: boolean;
@@ -48,6 +49,7 @@ export type ProductData = {
   subscriptionEnabled?: boolean;
   subscriptionDiscount?: number;
   subscriptionFrequency?: string[];
+  pageConfig?: StorefrontProductPageConfig;
   rawEvent?: NostrEvent;
 };
 
@@ -105,6 +107,7 @@ export const parseTags = (productEvent: NostrEvent) => {
         if (parsedShipping) {
           parsedData.shippingType = parsedShipping.shippingType;
           parsedData.shippingCost = parsedShipping.shippingCost;
+          parsedData.shippingCurrency = parsedShipping.shippingCurrency;
         }
         break;
       case "d":
@@ -226,6 +229,17 @@ export const parseTags = (productEvent: NostrEvent) => {
         break;
       case "subscription_frequency":
         parsedData.subscriptionFrequency = values;
+        break;
+      case "page_config":
+        if (values[0]) {
+          try {
+            parsedData.pageConfig = JSON.parse(
+              values[0]
+            ) as StorefrontProductPageConfig;
+          } catch {
+            // ignore invalid page_config payload
+          }
+        }
         break;
       default:
         return;

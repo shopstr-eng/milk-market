@@ -59,6 +59,11 @@ import {
 import { BLUEBUTTONCLASSNAMES } from "@/utils/STATIC-VARIABLES";
 import { calculateWeightedScore } from "@/utils/parsers/review-parser-functions";
 import { createNip98AuthorizationHeader } from "@/utils/nostr/nip98-auth";
+import {
+  buildSignedHttpRequestProofTemplate,
+  buildUpdateSubscriptionProof,
+  SIGNED_EVENT_HEADER,
+} from "@/utils/nostr/request-auth";
 import { getSatoshiValue } from "@getalby/lightning-tools";
 import currencySelection from "@/public/currencySelection.json";
 import {
@@ -148,6 +153,7 @@ const OrdersDashboard = ({
   const [showShippingModal, setShowShippingModal] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<OrderData | null>(null);
   const [isSendingShipping, setIsSendingShipping] = useState(false);
+  const [deliveryMode, setDeliveryMode] = useState<"days" | "date">("days");
 
   const [randomNpubForSender, setRandomNpubForSender] = useState<string>("");
   const [randomNsecForSender, setRandomNsecForSender] = useState<string>("");
@@ -169,9 +175,7 @@ const OrdersDashboard = ({
     ])
   );
 
-  const [displayCurrency, setDisplayCurrency] = useState<"sats" | "USD">(
-    "sats"
-  );
+  const [displayCurrency, setDisplayCurrency] = useState<"sats" | "USD">("USD");
   const [currencyRates, setCurrencyRates] = useState<Record<string, number>>(
     {}
   );
@@ -214,8 +218,10 @@ const OrdersDashboard = ({
     control: shippingControl,
     reset: shippingReset,
   } = useForm({
+    shouldUnregister: true,
     defaultValues: {
       "Delivery Time": "",
+      "Delivery Date": "",
       "Shipping Carrier": "",
       "Tracking Number": "",
     },
@@ -968,6 +974,7 @@ const OrdersDashboard = ({
 
   const handleOpenShippingModal = (order: OrderData) => {
     setSelectedOrder(order);
+    setDeliveryMode("days");
     shippingReset();
     setShowShippingModal(true);
   };
@@ -975,27 +982,31 @@ const OrdersDashboard = ({
   const handleCloseShippingModal = () => {
     setShowShippingModal(false);
     setSelectedOrder(null);
+    setDeliveryMode("days");
     shippingReset();
   };
 
   const onShippingSubmit = async (data: { [x: string]: string }) => {
-    if (!selectedOrder || !signer || !nostr) return;
+    // The email path only needs `selectedOrder` (for content) and `signer`
+    // (for the NIP-98 header). `nostr` is required solely for the gift-wrap
+    // relay publish below, so it must not gate the email.
+    if (!selectedOrder || !signer) return;
 
     setIsSendingShipping(true);
 
     try {
-      const decodedRandomPubkeyForSender = nip19.decode(randomNpubForSender);
-      const decodedRandomPrivkeyForSender = nip19.decode(randomNsecForSender);
-      const decodedRandomPubkeyForReceiver = nip19.decode(
-        randomNpubForReceiver
-      );
-      const decodedRandomPrivkeyForReceiver = nip19.decode(
-        randomNsecForReceiver
-      );
-
-      const daysToAdd = parseInt(data["Delivery Time"]!);
-      const currentTimestamp = Math.floor(Date.now() / 1000);
-      const futureTimestamp = currentTimestamp + daysToAdd * 24 * 60 * 60;
+      let futureTimestamp: number;
+      if (deliveryMode === "date") {
+        const [year, month, day] = data["Delivery Date"]!.split("-").map(
+          (part) => parseInt(part)
+        );
+        const deliveryDate = new Date(year!, month! - 1, day!);
+        futureTimestamp = Math.floor(deliveryDate.getTime() / 1000);
+      } else {
+        const daysToAdd = parseInt(data["Delivery Time"]!);
+        const currentTimestamp = Math.floor(Date.now() / 1000);
+        futureTimestamp = currentTimestamp + daysToAdd * 24 * 60 * 60;
+      }
 
       const humanReadableDate = new Date(
         futureTimestamp * 1000
@@ -1018,41 +1029,96 @@ const OrdersDashboard = ({
         " tracking number is: " +
         trackingNumber;
 
-      if (!selectedOrder.isGuest) {
-        const giftWrappedMessageEvent = await constructGiftWrappedEvent(
-          decodedRandomPubkeyForSender.data as string,
-          selectedOrder.buyerPubkey,
-          message,
-          "shipping-info",
-          {
-            productAddress: selectedOrder.productAddress,
-            type: 4, // Shipping update type
-            status: "shipped",
-            isOrder: true,
-            orderId: selectedOrder.orderId,
-            tracking: trackingNumber,
-            carrier: shippingCarrier,
-            eta: futureTimestamp,
-            buyerPubkey: selectedOrder.buyerPubkey,
-          }
-        );
+      // Fire the buyer shipping-confirmation email FIRST and independently.
+      // Nostr relay delivery and the status-update write below can throw or
+      // hang; keeping the email on its own path guarantees it is always
+      // attempted regardless of those outcomes.
+      const emailBody = JSON.stringify({
+        orderId: selectedOrder.orderId,
+        productTitle: selectedOrder.productTitle || "your order",
+        updateType: "shipping",
+        message:
+          "Your order has been shipped!" +
+          (trackingNumber ? ` Tracking: ${trackingNumber}` : ""),
+        trackingNumber: trackingNumber || undefined,
+        carrier: shippingCarrier || undefined,
+        estimatedDelivery: humanReadableDate || undefined,
+        buyerEmail: selectedOrder.buyerEmail || undefined,
+      });
 
-        const sealedEvent = await constructMessageSeal(
-          signer,
-          giftWrappedMessageEvent,
-          decodedRandomPubkeyForSender.data as string,
-          selectedOrder.buyerPubkey,
-          decodedRandomPrivkeyForSender.data as Uint8Array
-        );
+      createNip98AuthorizationHeader(
+        signer,
+        `${window.location.origin}/api/email/send-update-email`,
+        "POST",
+        emailBody
+      )
+        .then((emailAuthHeader) =>
+          fetch("/api/email/send-update-email", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: emailAuthHeader,
+            },
+            body: emailBody,
+          })
+        )
+        .catch((err) => console.error("Failed to send shipping email:", err));
 
-        const giftWrappedEvent = await constructMessageGiftWrap(
-          sealedEvent,
-          decodedRandomPubkeyForReceiver.data as string,
-          decodedRandomPrivkeyForReceiver.data as Uint8Array,
-          selectedOrder.buyerPubkey
-        );
+      // Send the encrypted shipping message to the buyer over Nostr. Isolate
+      // its failure so it can't abort the status update below.
+      if (!selectedOrder.isGuest && nostr) {
+        try {
+          const decodedRandomPubkeyForSender =
+            nip19.decode(randomNpubForSender);
+          const decodedRandomPrivkeyForSender =
+            nip19.decode(randomNsecForSender);
+          const decodedRandomPubkeyForReceiver = nip19.decode(
+            randomNpubForReceiver
+          );
+          const decodedRandomPrivkeyForReceiver = nip19.decode(
+            randomNsecForReceiver
+          );
 
-        await sendGiftWrappedMessageEvent(nostr, giftWrappedEvent, signer);
+          const giftWrappedMessageEvent = await constructGiftWrappedEvent(
+            decodedRandomPubkeyForSender.data as string,
+            selectedOrder.buyerPubkey,
+            message,
+            "shipping-info",
+            {
+              productAddress: selectedOrder.productAddress,
+              type: 4, // Shipping update type
+              status: "shipped",
+              isOrder: true,
+              orderId: selectedOrder.orderId,
+              tracking: trackingNumber,
+              carrier: shippingCarrier,
+              eta: futureTimestamp,
+              buyerPubkey: selectedOrder.buyerPubkey,
+            }
+          );
+
+          const sealedEvent = await constructMessageSeal(
+            signer,
+            giftWrappedMessageEvent,
+            decodedRandomPubkeyForSender.data as string,
+            selectedOrder.buyerPubkey,
+            decodedRandomPrivkeyForSender.data as Uint8Array
+          );
+
+          const giftWrappedEvent = await constructMessageGiftWrap(
+            sealedEvent,
+            decodedRandomPubkeyForReceiver.data as string,
+            decodedRandomPrivkeyForReceiver.data as Uint8Array,
+            selectedOrder.buyerPubkey
+          );
+
+          await sendGiftWrappedMessageEvent(nostr, giftWrappedEvent, signer);
+        } catch (giftWrapError) {
+          console.error(
+            "Failed to send shipping Nostr message:",
+            giftWrapError
+          );
+        }
       }
 
       // Update local state to shipped status (removes Send Shipping Update button)
@@ -1064,43 +1130,33 @@ const OrdersDashboard = ({
         )
       );
 
-      // Persist status to database
-      const body = JSON.stringify({
-        orderId: selectedOrder.orderId,
-        status: "shipped",
-      });
-      const authHeader = await createNip98AuthorizationHeader(
-        signer,
-        `${window.location.origin}/api/db/update-order-status`,
-        "POST",
-        body
-      );
-
-      fetch("/api/db/update-order-status", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: authHeader,
-        },
-        body,
-      }).catch((err) =>
-        console.error("Failed to persist shipped status:", err)
-      );
-
-      fetch("/api/email/send-update-email", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      // Persist status to database. Isolate so a signing/network failure here
+      // can't prevent the modal from closing or affect the email above.
+      try {
+        const body = JSON.stringify({
           orderId: selectedOrder.orderId,
-          productTitle: selectedOrder.productTitle || "your order",
-          updateType: "shipping",
-          message:
-            "Your order has been shipped!" +
-            (trackingNumber ? ` Tracking: ${trackingNumber}` : ""),
-          trackingNumber: trackingNumber || undefined,
-          carrier: shippingCarrier || undefined,
-        }),
-      }).catch(() => {});
+          status: "shipped",
+        });
+        const authHeader = await createNip98AuthorizationHeader(
+          signer,
+          `${window.location.origin}/api/db/update-order-status`,
+          "POST",
+          body
+        );
+
+        fetch("/api/db/update-order-status", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: authHeader,
+          },
+          body,
+        }).catch((err) =>
+          console.error("Failed to persist shipped status:", err)
+        );
+      } catch (statusError) {
+        console.error("Failed to sign shipped status update:", statusError);
+      }
 
       handleCloseShippingModal();
     } catch (error) {
@@ -1693,17 +1749,33 @@ const OrdersDashboard = ({
 
       await sendGiftWrappedMessageEvent(nostr, giftWrappedEvent, signer);
 
-      if (addressChangeOrder.subscriptionId) {
-        fetch("/api/stripe/update-subscription", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            subscriptionId: addressChangeOrder.subscriptionId,
-            shippingAddress: { address: newAddress },
-          }),
-        }).catch((err) =>
-          console.error("Failed to update subscription address in DB:", err)
-        );
+      if (addressChangeOrder.subscriptionId && signer && userPubkey) {
+        const subscriptionId = addressChangeOrder.subscriptionId;
+        signer
+          .sign(
+            buildSignedHttpRequestProofTemplate(
+              buildUpdateSubscriptionProof({
+                pubkey: userPubkey,
+                subscriptionId,
+              })
+            )
+          )
+          .then((signedEvent) =>
+            fetch("/api/stripe/update-subscription", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+              },
+              body: JSON.stringify({
+                subscriptionId,
+                shippingAddress: { address: newAddress },
+              }),
+            })
+          )
+          .catch((err) =>
+            console.error("Failed to update subscription address in DB:", err)
+          );
       }
 
       fetch("/api/email/send-subscription-email", {
@@ -1715,6 +1787,7 @@ const OrdersDashboard = ({
           productTitle: addressChangeOrder.productTitle || "Your product",
           newAddress: newAddress,
           subscriptionId: addressChangeOrder.subscriptionId,
+          sellerPubkey: addressChangeOrder.sellerPubkey || undefined,
         }),
       }).catch(() => {});
 
@@ -1831,7 +1904,7 @@ const OrdersDashboard = ({
                     Type
                   </th>
                   <th className="px-4 py-3 text-left text-xs font-bold tracking-wider text-black uppercase">
-                    Buyer/Seller
+                    Shopper/Vendor
                   </th>
                   <th className="px-4 py-3 text-left text-xs font-bold tracking-wider text-black uppercase">
                     Amount
@@ -2027,9 +2100,9 @@ const OrdersDashboard = ({
                             order.timestamp * 1000
                           ).toLocaleDateString()}
                         </td>
-                        <td className="max-w-xs px-4 py-4 text-sm text-black">
+                        <td className="px-4 py-4 align-top text-sm text-black">
                           <div
-                            className="truncate"
+                            className="break-words whitespace-pre-line"
                             title={order.address || "N/A"}
                           >
                             {order.address || "N/A"}
@@ -2209,37 +2282,121 @@ const OrdersDashboard = ({
           </ModalHeader>
           <form onSubmit={handleShippingSubmit(onShippingSubmit)}>
             <ModalBody>
-              <Controller
-                name="Delivery Time"
-                control={shippingControl}
-                rules={{
-                  required: "Expected delivery time is required.",
-                }}
-                render={({
-                  field: { onChange, onBlur, value },
-                  fieldState: { error },
-                }) => {
-                  const isErrored = error !== undefined;
-                  const errorMessage: string = error?.message
-                    ? error.message
-                    : "";
-                  return (
-                    <Input
-                      autoFocus
-                      label="Expected Delivery Time (days)"
-                      placeholder="e.g. 3"
-                      variant="bordered"
-                      isInvalid={isErrored}
-                      errorMessage={errorMessage}
-                      className="text-black"
-                      type="number"
-                      onChange={onChange}
-                      onBlur={onBlur}
-                      value={value}
-                    />
-                  );
-                }}
-              />
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={deliveryMode === "days" ? "solid" : "bordered"}
+                  className={
+                    deliveryMode === "days"
+                      ? "bg-black text-white"
+                      : "text-black"
+                  }
+                  onClick={() => setDeliveryMode("days")}
+                >
+                  Number of days
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={deliveryMode === "date" ? "solid" : "bordered"}
+                  className={
+                    deliveryMode === "date"
+                      ? "bg-black text-white"
+                      : "text-black"
+                  }
+                  onClick={() => setDeliveryMode("date")}
+                >
+                  Exact date
+                </Button>
+              </div>
+              {deliveryMode === "days" ? (
+                <Controller
+                  name="Delivery Time"
+                  control={shippingControl}
+                  rules={{
+                    required: "Expected delivery time is required.",
+                    validate: (value) => {
+                      const days = Number(value);
+                      if (!Number.isInteger(days) || days < 1) {
+                        return "Enter a whole number of days (1 or more).";
+                      }
+                      return true;
+                    },
+                  }}
+                  render={({
+                    field: { onChange, onBlur, value },
+                    fieldState: { error },
+                  }) => {
+                    const isErrored = error !== undefined;
+                    const errorMessage: string = error?.message
+                      ? error.message
+                      : "";
+                    return (
+                      <Input
+                        autoFocus
+                        label="Expected Delivery Time (days)"
+                        placeholder="e.g. 3"
+                        variant="bordered"
+                        isInvalid={isErrored}
+                        errorMessage={errorMessage}
+                        className="text-black"
+                        type="number"
+                        onChange={onChange}
+                        onBlur={onBlur}
+                        value={value}
+                      />
+                    );
+                  }}
+                />
+              ) : (
+                <Controller
+                  name="Delivery Date"
+                  control={shippingControl}
+                  rules={{
+                    required: "Expected delivery date is required.",
+                    validate: (value) => {
+                      if (!value) return "Expected delivery date is required.";
+                      const [year, month, day] = value
+                        .split("-")
+                        .map((part) => parseInt(part));
+                      const selected = new Date(year!, month! - 1, day!);
+                      if (isNaN(selected.getTime())) {
+                        return "Enter a valid date.";
+                      }
+                      const today = new Date();
+                      today.setHours(0, 0, 0, 0);
+                      if (selected < today) {
+                        return "Delivery date can't be in the past.";
+                      }
+                      return true;
+                    },
+                  }}
+                  render={({
+                    field: { onChange, onBlur, value },
+                    fieldState: { error },
+                  }) => {
+                    const isErrored = error !== undefined;
+                    const errorMessage: string = error?.message
+                      ? error.message
+                      : "";
+                    return (
+                      <Input
+                        autoFocus
+                        label="Expected Delivery Date"
+                        variant="bordered"
+                        isInvalid={isErrored}
+                        errorMessage={errorMessage}
+                        className="text-black"
+                        type="date"
+                        onChange={onChange}
+                        onBlur={onBlur}
+                        value={value}
+                      />
+                    );
+                  }}
+                />
+              )}
               <Controller
                 name="Shipping Carrier"
                 control={shippingControl}
@@ -2583,7 +2740,7 @@ const OrdersDashboard = ({
               </div>
               <div>
                 <label className="mb-2 block text-sm font-semibold text-black">
-                  Message to Seller
+                  Message to Vendor
                 </label>
                 <textarea
                   value={returnRequestMessage}

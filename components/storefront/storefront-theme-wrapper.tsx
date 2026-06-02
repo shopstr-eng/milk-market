@@ -16,7 +16,16 @@ import {
   StorefrontColorScheme,
   StorefrontFooter,
 } from "@/utils/types/types";
+import FormattedText from "./formatted-text";
 import StorefrontFooterComponent from "./storefront-footer";
+import {
+  StorefrontChromeProvider,
+  useInsideStorefrontChrome,
+} from "@/utils/storefront/storefront-chrome-context";
+import {
+  applyCustomDomainHref,
+  useIsCustomDomain,
+} from "@/utils/storefront/custom-domain-context";
 
 const DEFAULT_COLORS: StorefrontColorScheme = {
   primary: "#FFD23F",
@@ -46,10 +55,29 @@ const GOOGLE_FONT_OPTIONS = [
 
 interface StorefrontThemeWrapperProps {
   sellerPubkey: string;
+  // Whether to actually render the storefront chrome (nav, themed CSS,
+  // footer, mobile menu). When false we return children untouched so the
+  // wrapper can be mounted unconditionally from _app.tsx without changing
+  // the component tree shape on hydration. The decision is driven by
+  // `isCustomDomainVisit` in _app.tsx.
+  renderChrome: boolean;
   children: React.ReactNode;
 }
 
-export default function StorefrontThemeWrapper({
+export default function StorefrontThemeWrapper(
+  props: StorefrontThemeWrapperProps
+) {
+  const alreadyInside = useInsideStorefrontChrome();
+  if (alreadyInside) {
+    return <>{props.children}</>;
+  }
+  if (!props.renderChrome) {
+    return <>{props.children}</>;
+  }
+  return <StorefrontThemeWrapperInner {...props} />;
+}
+
+function StorefrontThemeWrapperInner({
   sellerPubkey,
   children,
 }: StorefrontThemeWrapperProps) {
@@ -58,6 +86,7 @@ export default function StorefrontThemeWrapper({
   const { isLoggedIn, pubkey: userPubkey } = useContext(SignerContext);
   const router = useRouter();
   const { isOpen, onOpen, onClose } = useDisclosure();
+  const isCustomDomain = useIsCustomDomain();
 
   const [storefront, setStorefront] = useState<StorefrontConfig | null>(null);
   const [colors, setColors] = useState<StorefrontColorScheme>(DEFAULT_COLORS);
@@ -105,8 +134,21 @@ export default function StorefrontThemeWrapper({
   }, [sellerPubkey]);
 
   useEffect(() => {
-    if (!storefront) return;
     document.body.classList.add("sf-active");
+    // While the seller's storefront config is still loading from relays,
+    // paint a neutral background + text color immediately. Without this
+    // the page sits as a flash of unstyled darkness for a couple of
+    // seconds while Nostr profile data round-trips — which is exactly
+    // the "blank screen" symptom reported on the custom domain.
+    if (!storefront) {
+      document.body.style.setProperty("--sf-bg", DEFAULT_COLORS.background);
+      document.body.style.setProperty("--sf-text", DEFAULT_COLORS.text);
+      return () => {
+        document.body.classList.remove("sf-active");
+        document.body.style.removeProperty("--sf-bg");
+        document.body.style.removeProperty("--sf-text");
+      };
+    }
     const vars: Record<string, string> = {
       "--sf-primary": colors.primary,
       "--sf-secondary": colors.secondary,
@@ -134,7 +176,7 @@ export default function StorefrontThemeWrapper({
 
   const profile = profileContext?.profileData?.get(sellerPubkey);
   const shop = shopMapContext.shopData.get(sellerPubkey);
-  const shopName = shop?.content?.name || profile?.content?.name || "Shop";
+  const shopName = shop?.content?.name || profile?.content?.name || "Stall";
   const pictureUrl =
     shop?.content?.ui?.picture || profile?.content?.picture || "";
   const shopSlug = storefront?.shopSlug || "";
@@ -205,7 +247,20 @@ export default function StorefrontThemeWrapper({
     return <>{children}</>;
   }
 
-  const homeHref = shopSlug ? `/shop/${shopSlug}` : "/marketplace";
+  // NOTE: `isCustomDomain` is already in scope from the top of this component
+  // (line 87). Calling useIsCustomDomain() again here was both a duplicate
+  // declaration and a Rules-of-Hooks violation (the hook would be called
+  // conditionally, since the early-return above could skip past it).
+  const homeHref = applyCustomDomainHref(
+    shopSlug ? `/stall/${shopSlug}` : "/marketplace",
+    shopSlug,
+    isCustomDomain
+  );
+  const ordersHref = applyCustomDomainHref(
+    shopSlug ? `/stall/${shopSlug}/orders` : "/orders",
+    shopSlug,
+    isCustomDomain
+  );
 
   const cssVars = {
     "--sf-primary": colors.primary,
@@ -234,6 +289,13 @@ export default function StorefrontThemeWrapper({
   const themedCss = `
     .storefront-themed .font-heading { font-family: var(--font-heading, inherit); }
     .storefront-themed .font-body { font-family: var(--font-body, inherit); }
+    .storefront-themed, .storefront-themed p, .storefront-themed span, .storefront-themed li, .storefront-themed a, .storefront-themed label, .storefront-themed div, .storefront-themed input, .storefront-themed textarea, .storefront-themed select, .storefront-themed button {
+      font-family: var(--font-body, inherit);
+    }
+    .storefront-themed h1, .storefront-themed h2, .storefront-themed h3, .storefront-themed h4, .storefront-themed h5, .storefront-themed h6,
+    .storefront-themed .font-heading, .storefront-themed button.font-heading {
+      font-family: var(--font-heading, var(--font-body, inherit));
+    }
     .storefront-themed .bg-primary-yellow { background-color: var(--sf-primary) !important; }
     .storefront-themed .bg-primary-blue { background-color: var(--sf-secondary) !important; }
     .storefront-themed .text-primary-blue { color: var(--sf-secondary) !important; }
@@ -250,6 +312,32 @@ export default function StorefrontThemeWrapper({
     .storefront-themed .bg-blue-100 { background-color: color-mix(in srgb, var(--sf-accent) 15%, var(--sf-bg)) !important; }
     .storefront-themed .hover\\:bg-blue-200:hover { background-color: color-mix(in srgb, var(--sf-accent) 25%, var(--sf-bg)) !important; }
 
+    ${
+      storefront?.neoShadows
+        ? `
+    .storefront-themed.sf-neo .rounded-lg.border-2,
+    .storefront-themed.sf-neo .rounded-xl.border-2,
+    .storefront-themed.sf-neo .rounded-2xl.border-2,
+    .storefront-themed.sf-neo .rounded.border-2,
+    .storefront-themed.sf-neo .rounded-lg.border,
+    .storefront-themed.sf-neo .rounded-xl.border,
+    .storefront-themed.sf-neo .rounded-2xl.border,
+    .storefront-themed.sf-neo .rounded.border,
+    .storefront-themed.sf-neo img.border,
+    .storefront-themed.sf-neo img.border-2 {
+      box-shadow: 4px 4px 0 var(--sf-secondary) !important;
+    }
+    .storefront-themed.sf-neo .rounded-lg.border,
+    .storefront-themed.sf-neo .rounded-xl.border,
+    .storefront-themed.sf-neo .rounded-2xl.border,
+    .storefront-themed.sf-neo .rounded.border {
+      border-width: 2px !important;
+      border-color: var(--sf-secondary) !important;
+    }
+    `
+        : ""
+    }
+
     body.sf-active [data-overlay-container] .border-black { border-color: var(--sf-secondary) !important; }
     body.sf-active [data-overlay-container] .shadow-neo {
       box-shadow: 4px 4px 0 var(--sf-secondary) !important;
@@ -261,10 +349,36 @@ export default function StorefrontThemeWrapper({
     body.sf-active [data-overlay-container] .border-primary-yellow { border-color: var(--sf-primary) !important; }
     body.sf-active [data-overlay-container] .font-heading { font-family: var(--font-heading, inherit); }
     body.sf-active [data-overlay-container] .font-body { font-family: var(--font-body, inherit); }
+
+    ${
+      storefront?.neoShadows
+        ? `
+    body.sf-active [data-overlay-container] .rounded-lg.border-2,
+    body.sf-active [data-overlay-container] .rounded-xl.border-2,
+    body.sf-active [data-overlay-container] .rounded-2xl.border-2,
+    body.sf-active [data-overlay-container] .rounded.border-2,
+    body.sf-active [data-overlay-container] .rounded-lg.border,
+    body.sf-active [data-overlay-container] .rounded-xl.border,
+    body.sf-active [data-overlay-container] .rounded-2xl.border,
+    body.sf-active [data-overlay-container] .rounded.border,
+    body.sf-active [data-overlay-container] img.border,
+    body.sf-active [data-overlay-container] img.border-2 {
+      box-shadow: 4px 4px 0 var(--sf-secondary) !important;
+    }
+    body.sf-active [data-overlay-container] .rounded-lg.border,
+    body.sf-active [data-overlay-container] .rounded-xl.border,
+    body.sf-active [data-overlay-container] .rounded-2xl.border,
+    body.sf-active [data-overlay-container] .rounded.border {
+      border-width: 2px !important;
+      border-color: var(--sf-secondary) !important;
+    }
+    `
+        : ""
+    }
   `;
 
   return (
-    <>
+    <StorefrontChromeProvider>
       <Head>
         {googleFontsUrl && (
           <>
@@ -281,7 +395,7 @@ export default function StorefrontThemeWrapper({
         <style>{themedCss}</style>
       </Head>
       <div
-        className="storefront-themed min-h-screen"
+        className={`storefront-themed min-h-screen ${storefront?.neoShadows ? "sf-neo" : ""}`}
         style={{
           ...cssVars,
           ...fontStyles,
@@ -306,12 +420,12 @@ export default function StorefrontThemeWrapper({
                   fetchPriority="high"
                 />
               )}
-              <span
+              <FormattedText
+                as="span"
                 className="font-heading text-lg font-bold"
                 style={{ color: navText }}
-              >
-                {shopName}
-              </span>
+                text={shopName}
+              />
             </a>
 
             <div className="flex items-center gap-2">
@@ -419,10 +533,10 @@ export default function StorefrontThemeWrapper({
                     style={{ color: navText + "CC" }}
                     onClick={() => setMobileMenuOpen(false)}
                   >
-                    Back to Shop
+                    Back to Stall
                   </a>
                   <a
-                    href={`/shop/${shopSlug}/orders`}
+                    href={ordersHref}
                     className="block px-6 py-3 text-sm font-medium"
                     style={{ color: navText + "CC" }}
                     onClick={() => setMobileMenuOpen(false)}
@@ -446,6 +560,6 @@ export default function StorefrontThemeWrapper({
         />
       </div>
       <SignInModal isOpen={isOpen} onClose={onClose} />
-    </>
+    </StorefrontChromeProvider>
   );
 }

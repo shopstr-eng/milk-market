@@ -12,7 +12,6 @@ import {
   fetchAllProfilesFromDb,
   fetchCachedEvents,
   fetchCommentsByReviewIds,
-  getSubscriptionsBySellerPubkey,
   createEmailFlow,
   getEmailFlows,
   getEmailFlow,
@@ -23,6 +22,7 @@ import {
   updateFlowStep,
   deleteFlowStep,
   getFlowEnrollments,
+  getSubscriptionsBySellerPubkey,
   getDbPool,
 } from "@/utils/db/db-service";
 import dns from "dns";
@@ -33,12 +33,35 @@ import {
   canActorUpdateMcpOrderStatus,
 } from "./order-status-auth";
 import {
+  buildAffiliateClickStatsProof,
+  buildAffiliateCodeCreateProof,
+  buildAffiliateCodeDeleteProof,
+  buildAffiliateCodeUpdateProof,
+  buildAffiliateCodesListProof,
+  buildAffiliateCreateProof,
+  buildAffiliateDeleteProof,
+  buildAffiliateMarkPaidProof,
+  buildAffiliatePayoutsListProof,
+  buildAffiliateReverseReferralProof,
+  buildAffiliateUpdateProof,
+  buildAffiliatesListProof,
+  buildCancelSubscriptionProof,
+  buildClearFailedRelayPublishProof,
   buildDiscountCodeCreateProof,
   buildDiscountCodeDeleteProof,
   buildDiscountCodesListProof,
+  buildListFailedRelayPublishesProof,
   buildSignedHttpRequestProofTemplate,
+  buildUpdateSubscriptionProof,
   SIGNED_EVENT_HEADER,
 } from "@/utils/nostr/request-auth";
+import {
+  buildMcpRequestProofTemplate,
+  buildStripeAccountStatusProof,
+  buildStripeCreateAccountLinkProof,
+  buildStripeCreateAccountProof,
+  MCP_SIGNED_EVENT_HEADER,
+} from "@/utils/mcp/request-proof";
 
 const resolveCname = promisify(dns.resolveCname);
 const resolve4 = promisify(dns.resolve4);
@@ -123,11 +146,156 @@ async function getSigner(apiKey: ApiKeyRecord): Promise<McpNostrSigner | null> {
   return result.signer as McpNostrSigner;
 }
 
+const PAGE_CONFIG_SECTION_TYPES = [
+  "hero",
+  "about",
+  "story",
+  "products",
+  "testimonials",
+  "faq",
+  "ingredients",
+  "comparison",
+  "text",
+  "image",
+  "contact",
+  "reviews",
+  "product_description",
+  "product_specifications",
+  "product_shipping_returns",
+  "product_gallery",
+  "related_products",
+] as const;
+
+const pageConfigSectionSchema = z
+  .object({
+    id: z.string().describe("Unique section ID"),
+    type: z.enum(PAGE_CONFIG_SECTION_TYPES).describe("Section type"),
+    enabled: z.boolean().optional(),
+    heading: z.string().optional(),
+    subheading: z.string().optional(),
+    body: z.string().optional(),
+    image: z.string().optional(),
+    imagePosition: z.enum(["left", "right"]).optional(),
+    fullWidth: z.boolean().optional(),
+    ctaText: z.string().optional(),
+    ctaLink: z.string().optional(),
+    overlayOpacity: z.number().optional(),
+    productLayout: z.enum(["grid", "list", "featured"]).optional(),
+    productLimit: z.number().optional(),
+    productIds: z.array(z.string()).optional(),
+    heroProductId: z.string().optional(),
+    email: z.string().optional(),
+    phone: z.string().optional(),
+    address: z.string().optional(),
+    caption: z.string().optional(),
+    reviewOrder: z.array(z.string()).optional(),
+    specifications: z
+      .array(z.object({ label: z.string(), value: z.string() }))
+      .optional()
+      .describe("Specification rows for product_specifications sections"),
+    shippingInfo: z
+      .string()
+      .optional()
+      .describe("Shipping body for product_shipping_returns sections"),
+    returnsInfo: z
+      .string()
+      .optional()
+      .describe("Returns body for product_shipping_returns sections"),
+    galleryImages: z
+      .array(z.string())
+      .optional()
+      .describe("Additional image URLs for product_gallery sections"),
+    useProductImages: z
+      .boolean()
+      .optional()
+      .describe("Include the product's main images in product_gallery"),
+    excludeCurrentProduct: z
+      .boolean()
+      .optional()
+      .describe("Exclude the current product from related_products"),
+    mergeAutoSpecs: z
+      .boolean()
+      .optional()
+      .describe(
+        "Auto-merge specs derived from the product (categories, condition, etc.) with custom specifications"
+      ),
+    items: z
+      .array(z.object({ question: z.string(), answer: z.string() }))
+      .optional(),
+    testimonials: z
+      .array(
+        z.object({
+          quote: z.string(),
+          author: z.string(),
+          image: z.string().optional(),
+          rating: z.number().optional(),
+        })
+      )
+      .optional(),
+  })
+  .passthrough();
+
+const productPageConfigSchema = z
+  .object({
+    sections: z
+      .array(pageConfigSectionSchema)
+      .optional()
+      .describe(
+        "Ordered sections for the product detail page. Include product-scoped types like 'product_description', 'product_specifications', 'product_shipping_returns', 'product_gallery', 'related_products', plus reusable types like 'reviews', 'text', 'image', 'faq'."
+      ),
+    themeOverrides: z
+      .object({
+        primary: z.string().optional(),
+        secondary: z.string().optional(),
+        accent: z.string().optional(),
+        background: z.string().optional(),
+        text: z.string().optional(),
+      })
+      .partial()
+      .optional()
+      .describe("Hex color overrides applied only to this product page"),
+    metaTitle: z
+      .string()
+      .optional()
+      .describe("SEO meta/OG title override (recommended ≤ 60 chars)"),
+    metaDescription: z
+      .string()
+      .optional()
+      .describe("SEO meta/OG description override (recommended ≤ 160 chars)"),
+    ogImage: z
+      .string()
+      .optional()
+      .describe("OG image URL override for social sharing"),
+  })
+  .describe(
+    "Per-product page customization. Persists as a 'page_config' tag on the kind 30402 event. Omit to inherit shop-wide product page defaults."
+  );
+
+function pageConfigToTag(
+  cfg: z.infer<typeof productPageConfigSchema> | undefined
+): string[] | null {
+  if (!cfg) return null;
+  const hasContent =
+    (cfg.sections && cfg.sections.length > 0) ||
+    (cfg.themeOverrides && Object.keys(cfg.themeOverrides).length > 0) ||
+    !!cfg.metaTitle ||
+    !!cfg.metaDescription ||
+    !!cfg.ogImage;
+  if (!hasContent) return null;
+  return ["page_config", JSON.stringify(cfg)];
+}
+
 export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
   const baseUrl = `http://localhost:${process.env.PORT || 5000}`;
+  const context = { apiKeyId: apiKey.id, pubkey: apiKey.pubkey };
+  const reg = (
+    name: string,
+    description: string,
+    inputSchema: any,
+    cb: (args: any, extra: any) => any
+  ) => registerTool(server, name, description, inputSchema, cb, context);
 
-  registerTool(
-    server,
+  reg(
     "set_user_profile",
     "Create or update your Nostr user profile (kind 0). Sets metadata like name, about, picture, lightning address, etc.",
     {
@@ -214,8 +382,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "set_shop_profile",
     "Create or update your shop profile (kind 30019). Sets shop metadata like name, about, picture, banner, and settings.",
     {
@@ -269,7 +436,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
         .string()
         .optional()
         .describe(
-          "URL slug for the storefront (e.g. 'fresh-farm' for milk.market/shop/fresh-farm). Must be lowercase alphanumeric with hyphens."
+          "URL slug for the storefront (e.g. 'fresh-farm' for milk.market/stall/fresh-farm). Must be lowercase alphanumeric with hyphens."
         ),
       storefrontFontHeading: z
         .string()
@@ -460,13 +627,18 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
         .boolean()
         .optional()
         .describe(
-          "Enable a community page on the storefront. When true, a 'Community' link is auto-added to the nav and /shop/{slug}/community shows the seller's community feed."
+          "Enable a community page on the storefront. When true, a 'Community' link is auto-added to the nav and /stall/{slug}/community shows the seller's community feed."
         ),
       showWalletPage: z
         .boolean()
         .optional()
         .describe(
-          "Enable a Bitcoin wallet page on the storefront for Cashu ecash payments. When true, a 'Wallet' link is auto-added to the nav and /shop/{slug}/wallet shows the wallet UI."
+          "Enable a Bitcoin wallet page on the storefront for Cashu ecash payments. When true, a 'Wallet' link is auto-added to the nav and /stall/{slug}/wallet shows the wallet UI."
+        ),
+      productPageDefaults: productPageConfigSchema
+        .optional()
+        .describe(
+          "Shop-wide defaults for every product detail page. Individual products can override these by setting their own page_config tag. Stored as storefront.productPageDefaults on the kind 30019 event."
         ),
     },
     async (params) => {
@@ -533,6 +705,8 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
           storefront.showCommunityPage = params.showCommunityPage;
         if (params.showWalletPage !== undefined)
           storefront.showWalletPage = params.showWalletPage;
+        if (params.productPageDefaults)
+          storefront.productPageDefaults = params.productPageDefaults;
         if (Object.keys(storefront).length > 0) content.storefront = storefront;
 
         const eventTemplate: EventTemplate = {
@@ -563,10 +737,9 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "register_shop_slug",
-    "Register, update, or delete your shop's URL slug for the storefront. The slug becomes part of your shop URL (e.g. milk.market/shop/your-slug). Slug must be lowercase alphanumeric with hyphens, 3-50 characters. Reserved words (shop, admin, api, etc.) are not allowed. To delete, set action to 'delete'.",
+    "Register, update, or delete your shop's URL slug for the storefront. The slug becomes part of your shop URL (e.g. milk.market/stall/your-slug). Slug must be lowercase alphanumeric with hyphens, 3-50 characters. Reserved words (stall, admin, api, etc.) are not allowed. To delete, set action to 'delete'.",
     {
       slug: z
         .string()
@@ -621,7 +794,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
         }
 
         const reserved = [
-          "shop",
+          "stall",
           "admin",
           "api",
           "www",
@@ -679,7 +852,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
         return successResponse(
           {
             slug,
-            storefrontUrl: `/shop/${slug}`,
+            storefrontUrl: `/stall/${slug}`,
             pubkey,
           },
           startTime
@@ -694,8 +867,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "create_product_listing",
     "Publish a new product listing (kind 30402) to the marketplace. Creates a classified listing with title, description, price, images, categories, shipping options, and more.",
     {
@@ -792,6 +964,11 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
         .optional()
         .describe(
           "Available subscription frequencies (e.g. ['weekly', 'monthly', 'quarterly'])"
+        ),
+      pageConfig: productPageConfigSchema
+        .optional()
+        .describe(
+          "Per-product page customization (sections, theme overrides, SEO meta). Persists as a 'page_config' tag. Omit to inherit shop-wide product page defaults."
         ),
     },
     async (params) => {
@@ -918,6 +1095,9 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
         const created_at = Math.floor(Date.now() / 1000);
         tags.push(["published_at", String(created_at)]);
 
+        const pageConfigTag = pageConfigToTag(params.pageConfig);
+        if (pageConfigTag) tags.push(pageConfigTag);
+
         const eventTemplate: EventTemplate = {
           created_at,
           kind: 30402,
@@ -980,10 +1160,9 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "update_product_listing",
-    "Update an existing product listing by publishing a new event with the same d-tag. All fields are optional — only provided fields will be included.",
+    "Update an existing product listing by publishing a new event with the same d-tag. Fetches the current event first and merges in only the fields you provide, so unspecified fields keep their existing values. Multi-value fields (images, categories, sizes, volumes, bulk, weights, pickupLocations) are fully replaced when supplied.",
     {
       dTag: z.string().describe("The d-tag of the listing to update"),
       title: z.string().optional().describe("Updated product title"),
@@ -1055,6 +1234,11 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
         .describe(
           "Available subscription frequencies (e.g. ['weekly', 'monthly', 'quarterly'])"
         ),
+      pageConfig: productPageConfigSchema
+        .optional()
+        .describe(
+          "Updated per-product page customization. Provide a full StorefrontProductPageConfig object to overwrite. Provide an empty object ({}) to clear the existing page_config and revert to shop-wide defaults. Omit to keep the existing page_config tag unchanged."
+        ),
     },
     async (params) => {
       const startTime = Date.now();
@@ -1063,115 +1247,183 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
       if (!signer) return noSignerError();
 
       try {
-        const tags: string[][] = [["d", params.dTag]];
+        const pubkey = signer.getPubKey();
+
+        let existingEvent: { tags: string[][]; content: string } | null = null;
+        try {
+          const existingEvents = await fetchCachedEvents(30402, { pubkey });
+          const match = existingEvents.find((e) =>
+            e.tags.some((t) => t[0] === "d" && t[1] === params.dTag)
+          );
+          if (match) {
+            existingEvent = { tags: match.tags, content: match.content };
+          }
+        } catch (fetchErr) {
+          console.warn(
+            "update_product_listing: failed to fetch existing event for merge",
+            fetchErr
+          );
+        }
+
+        const baseTags: string[][] = existingEvent
+          ? existingEvent.tags.map((t) => [...t])
+          : [["d", params.dTag]];
+
+        const stripKeys = (keys: string[]) => {
+          const set = new Set(keys);
+          for (let i = baseTags.length - 1; i >= 0; i--) {
+            if (set.has(baseTags[i][0])) baseTags.splice(i, 1);
+          }
+        };
+
+        stripKeys(["published_at"]);
 
         if (params.title) {
-          tags.push(["alt", `Product listing: ${params.title}`]);
-          tags.push(["title", params.title]);
+          stripKeys(["alt", "title"]);
+          baseTags.push(["alt", `Product listing: ${params.title}`]);
+          baseTags.push(["title", params.title]);
         }
         if (params.description) {
-          tags.push(["summary", params.description]);
+          stripKeys(["summary"]);
+          baseTags.push(["summary", params.description]);
         }
         if (params.price && params.currency) {
-          tags.push(["price", params.price, params.currency]);
+          stripKeys(["price"]);
+          baseTags.push(["price", params.price, params.currency]);
         }
-        if (params.location) {
-          tags.push(["location", params.location]);
+        if (params.location !== undefined) {
+          stripKeys(["location"]);
+          baseTags.push(["location", params.location]);
         }
         if (params.shippingOption) {
-          tags.push([
+          const existingShipping = baseTags.find((t) => t[0] === "shipping");
+          const fallbackCurrency =
+            params.currency ||
+            existingShipping?.[3] ||
+            baseTags.find((t) => t[0] === "price")?.[2] ||
+            "";
+          stripKeys(["shipping"]);
+          baseTags.push([
             "shipping",
             params.shippingOption,
-            params.shippingCost || "0",
-            params.currency || "",
+            params.shippingCost || existingShipping?.[2] || "0",
+            fallbackCurrency,
           ]);
         }
         if (params.images) {
-          for (const img of params.images) {
-            tags.push(["image", img]);
-          }
+          stripKeys(["image"]);
+          for (const img of params.images) baseTags.push(["image", img]);
         }
         if (params.categories) {
-          for (const cat of params.categories) {
-            tags.push(["t", cat]);
-          }
-          tags.push(["t", "MilkMarket"]);
+          stripKeys(["t"]);
+          for (const cat of params.categories) baseTags.push(["t", cat]);
+          baseTags.push(["t", "MilkMarket"]);
         }
-        if (params.quantity) {
-          tags.push(["quantity", params.quantity]);
+        if (params.quantity !== undefined) {
+          stripKeys(["quantity"]);
+          baseTags.push(["quantity", params.quantity]);
         }
         if (params.condition) {
-          tags.push(["condition", params.condition]);
+          stripKeys(["condition"]);
+          baseTags.push(["condition", params.condition]);
         }
         if (params.status) {
-          tags.push(["status", params.status]);
+          stripKeys(["status"]);
+          baseTags.push(["status", params.status]);
         }
         if (params.sizes) {
-          for (const s of params.sizes) {
-            tags.push(["size", s.size, s.quantity]);
-          }
+          stripKeys(["size"]);
+          for (const s of params.sizes)
+            baseTags.push(["size", s.size, s.quantity]);
         }
         if (params.volumes) {
-          for (const v of params.volumes) {
-            tags.push(["volume", v.volume, v.price]);
-          }
+          stripKeys(["volume"]);
+          for (const v of params.volumes)
+            baseTags.push(["volume", v.volume, v.price]);
         }
         if (params.bulk) {
+          stripKeys(["bulk"]);
           for (const b of params.bulk) {
-            if (b.variant) {
-              tags.push(["bulk", b.units, b.price, b.variant]);
-            } else {
-              tags.push(["bulk", b.units, b.price]);
-            }
+            if (b.variant) baseTags.push(["bulk", b.units, b.price, b.variant]);
+            else baseTags.push(["bulk", b.units, b.price]);
           }
         }
         if (params.weights) {
-          for (const w of params.weights) {
-            tags.push(["weight", w.weight, w.price]);
+          stripKeys(["weight"]);
+          for (const w of params.weights)
+            baseTags.push(["weight", w.weight, w.price]);
+        }
+        if (params.herdshareAgreement !== undefined) {
+          stripKeys(["herdshare_agreement"]);
+          if (params.herdshareAgreement) {
+            baseTags.push(["herdshare_agreement", params.herdshareAgreement]);
           }
         }
-        if (params.herdshareAgreement) {
-          tags.push(["herdshare_agreement", params.herdshareAgreement]);
-        }
-        if (params.requiredCustomerInfo) {
-          tags.push(["required_customer_info", params.requiredCustomerInfo]);
+        if (params.requiredCustomerInfo !== undefined) {
+          stripKeys(["required_customer_info"]);
+          if (params.requiredCustomerInfo) {
+            baseTags.push([
+              "required_customer_info",
+              params.requiredCustomerInfo,
+            ]);
+          }
         }
         if (params.pickupLocations) {
-          for (const loc of params.pickupLocations) {
-            tags.push(["pickup_location", loc.trim()]);
-          }
+          stripKeys(["pickup_location"]);
+          for (const loc of params.pickupLocations)
+            baseTags.push(["pickup_location", loc.trim()]);
         }
         if (params.expiration) {
           const unixTime = Math.floor(
             new Date(params.expiration).getTime() / 1000
           );
-          tags.push(["valid_until", unixTime.toString()]);
+          stripKeys(["valid_until"]);
+          baseTags.push(["valid_until", unixTime.toString()]);
         }
 
-        if (params.subscriptionEnabled) {
-          tags.push(["subscription", "true"]);
-          if (params.subscriptionDiscount) {
-            tags.push(["subscription_discount", params.subscriptionDiscount]);
+        if (params.subscriptionEnabled !== undefined) {
+          stripKeys([
+            "subscription",
+            "subscription_discount",
+            "subscription_frequency",
+          ]);
+          if (params.subscriptionEnabled) {
+            baseTags.push(["subscription", "true"]);
+            if (params.subscriptionDiscount) {
+              baseTags.push([
+                "subscription_discount",
+                params.subscriptionDiscount,
+              ]);
+            }
+            if (
+              params.subscriptionFrequencies &&
+              params.subscriptionFrequencies.length > 0
+            ) {
+              baseTags.push([
+                "subscription_frequency",
+                ...params.subscriptionFrequencies,
+              ]);
+            }
           }
-          if (
-            params.subscriptionFrequencies &&
-            params.subscriptionFrequencies.length > 0
-          ) {
-            tags.push([
-              "subscription_frequency",
-              ...params.subscriptionFrequencies,
-            ]);
-          }
+        }
+
+        if (params.pageConfig !== undefined) {
+          stripKeys(["page_config"]);
+          const pageConfigTag = pageConfigToTag(params.pageConfig);
+          if (pageConfigTag) baseTags.push(pageConfigTag);
         }
 
         const created_at = Math.floor(Date.now() / 1000);
-        tags.push(["published_at", String(created_at)]);
+        baseTags.push(["published_at", String(created_at)]);
 
         const eventTemplate: EventTemplate = {
           created_at,
           kind: 30402,
-          tags,
-          content: params.description || "",
+          tags: baseTags,
+          content:
+            params.description !== undefined
+              ? params.description
+              : existingEvent?.content || "",
         };
 
         const signedEvent = await signAndPublishEvent(signer, eventTemplate);
@@ -1195,8 +1447,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "delete_listing",
     "Delete a product listing or any Nostr event by publishing a deletion event (kind 5).",
     {
@@ -1236,8 +1487,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "publish_review",
     "Publish a review (kind 31555) for a product or seller. Includes content text and ratings.",
     {
@@ -1518,8 +1768,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "send_direct_message",
     "Send an encrypted direct message using NIP-17 gift wrap (kind 1059/13/14). Supports plain messages, listing inquiries, and order-related messages.",
     {
@@ -1733,8 +1982,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "update_order_address",
     "Update the shipping address for an existing order. Sends an encrypted address change request to the seller via NIP-17 gift-wrapped DM and updates the order record.",
     {
@@ -1884,8 +2132,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "send_shipping_update",
     "Send a shipping update to a buyer via encrypted NIP-17 gift-wrapped DM. Includes tracking number, carrier, and estimated delivery time. Also updates the order status to 'shipped' in the database.",
     {
@@ -2085,8 +2332,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "update_order_status",
     "Update the status of an order and optionally notify the buyer via encrypted DM. Sellers can confirm, ship, or complete orders. Buyers can cancel orders.",
     {
@@ -2285,8 +2531,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "list_messages",
     "Fetch and decrypt your incoming messages (NIP-17 gift-wrapped DMs). Returns decrypted message content, sender, subject, and read status. Use to check inquiries, order messages, address changes, and other DMs.",
     {
@@ -2409,8 +2654,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "mark_messages_read",
     "Mark specific messages as read by their event IDs.",
     {
@@ -2453,8 +2697,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "set_relay_list",
     "Publish your relay list (kind 10002, NIP-65). Configures which relays you read from and write to.",
     {
@@ -2516,8 +2759,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "set_blossom_servers",
     "Publish your Blossom media server list (kind 10063). Configures which servers to use for media uploads.",
     {
@@ -2563,8 +2805,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "upload_media",
     "Upload media to a Blossom server. Creates a signed authorization event (kind 24242) and uploads the file. Returns the URL of the uploaded media.",
     {
@@ -2665,8 +2906,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "create_discount_code",
     "Create a discount code for your shop. Codes are percentage-based and can have optional expiration dates.",
     {
@@ -2734,8 +2974,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "delete_discount_code",
     "Delete one of your discount codes.",
     {
@@ -2784,8 +3023,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "list_discount_codes",
     "List your shop's discount codes.",
     {},
@@ -2828,8 +3066,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "get_cashu_balance",
     "Check your Cashu wallet balance by querying stored proof events.",
     {
@@ -2891,8 +3128,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "receive_cashu_tokens",
     "Receive Cashu tokens and store them as a proof event (kind 7375). Publishes the encrypted proof event to your Nostr relays.",
     {
@@ -2959,8 +3195,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "set_cashu_mints",
     "Configure your Cashu wallet mints by publishing a wallet configuration event (kind 17375).",
     {
@@ -3020,8 +3255,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
     }
   );
 
-  registerTool(
-    server,
+  reg(
     "send_cashu_payment",
     "Send a Cashu payment by melting tokens to pay a Lightning invoice. Uses proofs from your stored Cashu wallet.",
     {
@@ -4292,6 +4526,1426 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
       } catch (error) {
         return errorResponse(
           "Failed to list email captures",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "list_affiliates",
+    "List all affiliates (referral partners) registered to your shop.",
+    {},
+    async () => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(buildAffiliatesListProof(pubkey))
+        );
+        const res = await fetch(
+          `${baseUrl}/api/affiliates/manage?pubkey=${pubkey}`,
+          {
+            headers: { [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent) },
+          }
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to list affiliates",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(
+          { count: Array.isArray(data) ? data.length : 0, affiliates: data },
+          startTime
+        );
+      } catch (error) {
+        return errorResponse(
+          "Failed to list affiliates",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "create_affiliate",
+    "Register a new affiliate (referral partner) for your shop. Returns the created record including a unique invite_token the affiliate uses to claim their account.",
+    {
+      name: z.string().describe("Affiliate display name"),
+      email: z.string().optional().describe("Contact email (optional)"),
+      lightningAddress: z
+        .string()
+        .optional()
+        .describe("Lightning address for payouts (optional)"),
+      stripeAccountId: z
+        .string()
+        .optional()
+        .describe("Stripe Connect account id for payouts (optional)"),
+      notes: z.string().optional().describe("Internal notes (optional)"),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildAffiliateCreateProof({ pubkey, name: params.name })
+          )
+        );
+        const res = await fetch(`${baseUrl}/api/affiliates/manage`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+          },
+          body: JSON.stringify({ pubkey, ...params }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to create affiliate",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse({ affiliate: data }, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to create affiliate",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "update_affiliate",
+    "Update an existing affiliate's metadata (name, email, payout details, notes).",
+    {
+      affiliateId: z.number().describe("Affiliate id to update"),
+      name: z.string().optional(),
+      email: z.string().optional(),
+      lightningAddress: z.string().optional(),
+      stripeAccountId: z.string().optional(),
+      notes: z.string().optional(),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildAffiliateUpdateProof({
+              pubkey,
+              affiliateId: params.affiliateId,
+            })
+          )
+        );
+        const res = await fetch(`${baseUrl}/api/affiliates/manage`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+          },
+          body: JSON.stringify({ pubkey, ...params }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to update affiliate",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse({ affiliate: data }, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to update affiliate",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "delete_affiliate",
+    "Delete an affiliate. Fails with a 409 if the affiliate has an unsettled balance unless `force` is true.",
+    {
+      affiliateId: z.number().describe("Affiliate id to delete"),
+      force: z
+        .boolean()
+        .optional()
+        .describe("Force delete even if there is an unsettled balance"),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildAffiliateDeleteProof({
+              pubkey,
+              affiliateId: params.affiliateId,
+            })
+          )
+        );
+        const res = await fetch(`${baseUrl}/api/affiliates/manage`, {
+          method: "DELETE",
+          headers: {
+            "Content-Type": "application/json",
+            [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+          },
+          body: JSON.stringify({
+            pubkey,
+            affiliateId: params.affiliateId,
+            force: params.force ?? false,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to delete affiliate",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(
+          { affiliateId: params.affiliateId, deleted: true },
+          startTime
+        );
+      } catch (error) {
+        return errorResponse(
+          "Failed to delete affiliate",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "regenerate_affiliate_invite_token",
+    "Rotate the invite token for an affiliate. Useful if the previous link was leaked or needs to be reissued.",
+    {
+      affiliateId: z.number().describe("Affiliate id"),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildAffiliateUpdateProof({
+              pubkey,
+              affiliateId: params.affiliateId,
+            })
+          )
+        );
+        const res = await fetch(`${baseUrl}/api/affiliates/manage`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+          },
+          body: JSON.stringify({
+            pubkey,
+            affiliateId: params.affiliateId,
+            action: "regenerate-invite-token",
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to regenerate invite token",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(
+          { affiliateId: params.affiliateId, inviteToken: data.invite_token },
+          startTime
+        );
+      } catch (error) {
+        return errorResponse(
+          "Failed to regenerate invite token",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "set_affiliate_payouts_enabled",
+    "Enable or disable automated payouts for a specific affiliate.",
+    {
+      affiliateId: z.number().describe("Affiliate id"),
+      enabled: z.boolean().describe("Whether automated payouts are enabled"),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildAffiliateUpdateProof({
+              pubkey,
+              affiliateId: params.affiliateId,
+            })
+          )
+        );
+        const res = await fetch(`${baseUrl}/api/affiliates/manage`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+          },
+          body: JSON.stringify({
+            pubkey,
+            affiliateId: params.affiliateId,
+            action: "set-payouts-enabled",
+            enabled: params.enabled,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to update payouts setting",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse({ affiliate: data }, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to update payouts setting",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "list_affiliate_codes",
+    "List all affiliate codes registered across your affiliates.",
+    {},
+    async () => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildAffiliateCodesListProof(pubkey)
+          )
+        );
+        const res = await fetch(
+          `${baseUrl}/api/affiliates/codes?pubkey=${pubkey}`,
+          {
+            headers: { [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent) },
+          }
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to list affiliate codes",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(
+          { count: Array.isArray(data) ? data.length : 0, codes: data },
+          startTime
+        );
+      } catch (error) {
+        return errorResponse(
+          "Failed to list affiliate codes",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "create_affiliate_code",
+    "Create an affiliate (referral) code linked to one of your affiliates. The code is normalized to uppercase server-side.",
+    {
+      affiliateId: z.number().describe("Affiliate id this code belongs to"),
+      code: z.string().describe("Code string (e.g. 'ALICE10')"),
+      rebateType: z
+        .enum(["percent", "fixed"])
+        .describe("How the affiliate's rebate is computed"),
+      rebateValue: z
+        .number()
+        .describe(
+          "Rebate value: percent (0-100) for 'percent', smallest currency unit for 'fixed'"
+        ),
+      buyerDiscountType: z
+        .enum(["percent", "fixed"])
+        .optional()
+        .describe("Buyer-facing discount type (default 'percent')"),
+      buyerDiscountValue: z
+        .number()
+        .optional()
+        .describe("Buyer-facing discount value (default 0)"),
+      currency: z
+        .string()
+        .optional()
+        .describe("Currency code for fixed amounts (e.g. 'USD', 'SAT')"),
+      payoutSchedule: z
+        .enum(["weekly", "biweekly", "monthly"])
+        .optional()
+        .describe("Cadence for automated payouts (default 'monthly')"),
+      expiration: z
+        .number()
+        .optional()
+        .describe("Expiration as Unix timestamp (optional)"),
+      maxUses: z
+        .number()
+        .optional()
+        .describe("Maximum number of uses before deactivation (optional)"),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const normalizedCode = params.code.trim().toUpperCase();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildAffiliateCodeCreateProof({
+              pubkey,
+              affiliateId: params.affiliateId,
+              code: normalizedCode,
+            })
+          )
+        );
+        const res = await fetch(`${baseUrl}/api/affiliates/codes`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+          },
+          body: JSON.stringify({ pubkey, ...params, code: normalizedCode }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to create affiliate code",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse({ code: data }, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to create affiliate code",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "update_affiliate_code",
+    "Update an affiliate code's settings (active state, limits, expiration, etc).",
+    {
+      codeId: z.number().describe("Affiliate code id"),
+      isActive: z.boolean().optional(),
+      maxUses: z.number().optional(),
+      expiration: z.number().optional(),
+      rebateType: z.enum(["percent", "fixed"]).optional(),
+      rebateValue: z.number().optional(),
+      buyerDiscountType: z.enum(["percent", "fixed"]).optional(),
+      buyerDiscountValue: z.number().optional(),
+      payoutSchedule: z.enum(["weekly", "biweekly", "monthly"]).optional(),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildAffiliateCodeUpdateProof({ pubkey, codeId: params.codeId })
+          )
+        );
+        const res = await fetch(`${baseUrl}/api/affiliates/codes`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+          },
+          body: JSON.stringify({ pubkey, ...params }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to update affiliate code",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse({ code: data }, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to update affiliate code",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "delete_affiliate_code",
+    "Delete an affiliate code.",
+    {
+      codeId: z.number().describe("Affiliate code id to delete"),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildAffiliateCodeDeleteProof({ pubkey, codeId: params.codeId })
+          )
+        );
+        const res = await fetch(`${baseUrl}/api/affiliates/codes`, {
+          method: "DELETE",
+          headers: {
+            "Content-Type": "application/json",
+            [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+          },
+          body: JSON.stringify({ pubkey, codeId: params.codeId }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to delete affiliate code",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(
+          { codeId: params.codeId, deleted: true },
+          startTime
+        );
+      } catch (error) {
+        return errorResponse(
+          "Failed to delete affiliate code",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "list_affiliate_payouts",
+    "Fetch payout balances, historical payouts, and referral records for your affiliates.",
+    {},
+    async () => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildAffiliatePayoutsListProof(pubkey)
+          )
+        );
+        const res = await fetch(
+          `${baseUrl}/api/affiliates/payouts?pubkey=${pubkey}`,
+          {
+            headers: { [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent) },
+          }
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to list affiliate payouts",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(data, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to list affiliate payouts",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "mark_affiliate_paid",
+    "Manually mark an affiliate's pending balance as settled out-of-band (cash, off-platform transfer, etc). Settles the entire bundle for the given currency.",
+    {
+      affiliateId: z.number().describe("Affiliate id"),
+      amountSmallest: z
+        .number()
+        .describe("Amount in smallest currency unit (cents, sats, etc)"),
+      currency: z.string().describe("Currency code (e.g. 'USD', 'SAT')"),
+      note: z.string().optional().describe("Internal note for the payout"),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildAffiliateMarkPaidProof({
+              pubkey,
+              affiliateId: params.affiliateId,
+              amountSmallest: params.amountSmallest,
+              currency: params.currency,
+            })
+          )
+        );
+        const res = await fetch(`${baseUrl}/api/affiliates/mark-paid`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+          },
+          body: JSON.stringify({ pubkey, ...params }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to mark affiliate paid",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(data, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to mark affiliate paid",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "reverse_affiliate_referral",
+    "Manually reverse affiliate referrals tied to an order (used when refunding Lightning/Cashu orders that have no Stripe webhook).",
+    {
+      orderId: z
+        .string()
+        .describe("Order id whose referrals should be reversed"),
+      originalGrossSmallest: z
+        .number()
+        .optional()
+        .describe(
+          "Original gross order amount in smallest unit (for partial-refund scaling)"
+        ),
+      refundedSmallest: z
+        .number()
+        .optional()
+        .describe(
+          "Refunded amount in smallest unit (for partial-refund scaling)"
+        ),
+      note: z
+        .string()
+        .max(256)
+        .optional()
+        .describe("Short note recorded with the reversal (max 256 chars)"),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildAffiliateReverseReferralProof({
+              pubkey,
+              orderId: params.orderId,
+              sellerPubkey: pubkey,
+            })
+          )
+        );
+        const res = await fetch(`${baseUrl}/api/affiliates/reverse-referral`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+          },
+          body: JSON.stringify({
+            pubkey,
+            sellerPubkey: pubkey,
+            ...params,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to reverse affiliate referral",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(data, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to reverse affiliate referral",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "list_affiliate_click_stats",
+    "Fetch per-code click and conversion aggregates for your affiliate codes.",
+    {
+      sinceDays: z
+        .number()
+        .min(1)
+        .max(365)
+        .optional()
+        .describe("Lookback window in days (1-365, default 30)"),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildAffiliateClickStatsProof(pubkey)
+          )
+        );
+        const qs = new URLSearchParams({ pubkey });
+        if (params.sinceDays != null)
+          qs.set("sinceDays", String(params.sinceDays));
+        const res = await fetch(
+          `${baseUrl}/api/affiliates/click-stats?${qs.toString()}`,
+          {
+            headers: { [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent) },
+          }
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to fetch affiliate click stats",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(data, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to fetch affiliate click stats",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "get_stock",
+    "Look up current inventory levels for one of your products. Returns the per-variant breakdown if no variantKey is provided.",
+    {
+      productId: z.string().describe("Product id (Nostr d-tag)"),
+      variantKey: z
+        .string()
+        .optional()
+        .describe(
+          "Variant key (e.g. '_default' or 'size:XL'). Omit to list all variants."
+        ),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const qs = new URLSearchParams({ productId: params.productId });
+        if (params.variantKey) qs.set("variantKey", params.variantKey);
+        const res = await fetch(`${baseUrl}/api/inventory?${qs.toString()}`);
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to fetch stock",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(data, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to fetch stock",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "set_stock",
+    "Set inventory quantity for one of your products (or a specific variant). Always uses your signing pubkey as the seller.",
+    {
+      productId: z.string().describe("Product id (Nostr d-tag)"),
+      quantity: z.number().int().min(0).describe("New quantity"),
+      variantKey: z
+        .string()
+        .optional()
+        .describe("Variant key (default '_default' for non-variant products)"),
+      source: z
+        .string()
+        .optional()
+        .describe("Free-form source label, defaults to 'seller_override'"),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const sellerPubkey = signer.getPubKey();
+        const res = await fetch(`${baseUrl}/api/inventory`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "set",
+            productId: params.productId,
+            sellerPubkey,
+            quantity: params.quantity,
+            variantKey: params.variantKey,
+            source: params.source ?? "seller_override",
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to set stock",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(data, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to set stock",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "list_failed_relay_publishes",
+    "List your Nostr events that failed to publish to one or more relays. Use clear_failed_relay_publish or retry_failed_relay_publish to resolve them.",
+    {},
+    async () => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildListFailedRelayPublishesProof(pubkey)
+          )
+        );
+        const res = await fetch(`${baseUrl}/api/db/get-failed-publishes`, {
+          headers: { [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent) },
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to list failed relay publishes",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(
+          { count: Array.isArray(data) ? data.length : 0, failures: data },
+          startTime
+        );
+      } catch (error) {
+        return errorResponse(
+          "Failed to list failed relay publishes",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "clear_failed_relay_publish",
+    "Mark a failed relay publish entry as resolved (it will be removed from the retry queue).",
+    {
+      eventId: z.string().describe("Nostr event id of the failed publish"),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildClearFailedRelayPublishProof({
+              pubkey,
+              eventId: params.eventId,
+              incrementRetry: false,
+            })
+          )
+        );
+        const res = await fetch(`${baseUrl}/api/db/clear-failed-publish`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+          },
+          body: JSON.stringify({
+            eventId: params.eventId,
+            incrementRetry: false,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to clear failed relay publish",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(
+          { eventId: params.eventId, cleared: true },
+          startTime
+        );
+      } catch (error) {
+        return errorResponse(
+          "Failed to clear failed relay publish",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "retry_failed_relay_publish",
+    "Increment the retry counter on a failed relay publish entry. Used by background workers (or you, manually) to record another retry attempt without removing the entry.",
+    {
+      eventId: z.string().describe("Nostr event id of the failed publish"),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildClearFailedRelayPublishProof({
+              pubkey,
+              eventId: params.eventId,
+              incrementRetry: true,
+            })
+          )
+        );
+        const res = await fetch(`${baseUrl}/api/db/clear-failed-publish`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+          },
+          body: JSON.stringify({
+            eventId: params.eventId,
+            incrementRetry: true,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to record retry attempt",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(
+          { eventId: params.eventId, retryRecorded: true },
+          startTime
+        );
+      } catch (error) {
+        return errorResponse(
+          "Failed to record retry attempt",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "get_stripe_connect_status",
+    "Check your Stripe Connect onboarding status: whether the account exists, onboarding is complete, and charges/payouts are enabled.",
+    {},
+    async () => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildMcpRequestProofTemplate(buildStripeAccountStatusProof(pubkey))
+        );
+        const res = await fetch(
+          `${baseUrl}/api/stripe/connect/account-status`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              [MCP_SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+            },
+            body: JSON.stringify({ pubkey }),
+          }
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to fetch Stripe Connect status",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(data, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to fetch Stripe Connect status",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "create_stripe_connect_account",
+    "Create a Stripe Connect Express account for your shop. Returns the new (or existing) Stripe account id. Follow up with create_stripe_onboarding_link to get the onboarding URL.",
+    {},
+    async () => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildMcpRequestProofTemplate(buildStripeCreateAccountProof(pubkey))
+        );
+        const res = await fetch(
+          `${baseUrl}/api/stripe/connect/create-account`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              [MCP_SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+            },
+            body: JSON.stringify({ pubkey }),
+          }
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to create Stripe Connect account",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(data, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to create Stripe Connect account",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "create_stripe_onboarding_link",
+    "Generate a Stripe Connect onboarding URL the seller can open to complete (or refresh) their account setup.",
+    {
+      accountId: z
+        .string()
+        .describe(
+          "Stripe Connect account id (from create_stripe_connect_account or get_stripe_connect_status)"
+        ),
+      returnUrl: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute https:// or milkmarket:// URL to return to after onboarding completes"
+        ),
+      refreshUrl: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute https:// or milkmarket:// URL Stripe sends the user to if the link expires"
+        ),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const signedEvent = signer.sign(
+          buildMcpRequestProofTemplate(
+            buildStripeCreateAccountLinkProof({
+              pubkey,
+              accountId: params.accountId,
+            })
+          )
+        );
+        const res = await fetch(
+          `${baseUrl}/api/stripe/connect/create-account-link`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              [MCP_SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+            },
+            body: JSON.stringify({
+              pubkey,
+              accountId: params.accountId,
+              returnUrl: params.returnUrl,
+              refreshUrl: params.refreshUrl,
+            }),
+          }
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to create Stripe onboarding link",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(data, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to create Stripe onboarding link",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "cancel_subscription",
+    "Cancel one of your shop's recurring Stripe subscriptions at the end of the current period. Verifies that the subscription belongs to you.",
+    {
+      subscriptionId: z.string().describe("Stripe subscription id"),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const subs = await getSubscriptionsBySellerPubkey(pubkey);
+        const owned = subs.find(
+          (s: any) => s.stripe_subscription_id === params.subscriptionId
+        );
+        if (!owned) {
+          return errorResponse(
+            "Subscription not found",
+            "This subscription doesn't belong to your shop",
+            startTime
+          );
+        }
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildCancelSubscriptionProof({
+              pubkey,
+              subscriptionId: params.subscriptionId,
+            })
+          )
+        );
+        const res = await fetch(`${baseUrl}/api/stripe/cancel-subscription`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+          },
+          body: JSON.stringify({
+            subscriptionId: params.subscriptionId,
+            connectedAccountId: owned.connected_account_id,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to cancel subscription",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(data, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to cancel subscription",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "update_subscription",
+    "Update one of your shop's recurring Stripe subscriptions: change the shipping address and/or push the next billing date. Verifies that the subscription belongs to you.",
+    {
+      subscriptionId: z.string().describe("Stripe subscription id"),
+      shippingAddress: z
+        .object({
+          name: z.string().optional(),
+          line1: z.string().optional(),
+          line2: z.string().optional(),
+          city: z.string().optional(),
+          state: z.string().optional(),
+          postal_code: z.string().optional(),
+          country: z.string().optional(),
+        })
+        .partial()
+        .optional()
+        .describe("New shipping address (any subset of fields)"),
+      nextBillingDate: z
+        .string()
+        .optional()
+        .describe(
+          "ISO 8601 date/time for the next billing cycle (uses Stripe trial_end to push the date)"
+        ),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const subs = await getSubscriptionsBySellerPubkey(pubkey);
+        const owned = subs.find(
+          (s: any) => s.stripe_subscription_id === params.subscriptionId
+        );
+        if (!owned) {
+          return errorResponse(
+            "Subscription not found",
+            "This subscription doesn't belong to your shop",
+            startTime
+          );
+        }
+        const signedEvent = signer.sign(
+          buildSignedHttpRequestProofTemplate(
+            buildUpdateSubscriptionProof({
+              pubkey,
+              subscriptionId: params.subscriptionId,
+            })
+          )
+        );
+        const res = await fetch(`${baseUrl}/api/stripe/update-subscription`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            [SIGNED_EVENT_HEADER]: JSON.stringify(signedEvent),
+          },
+          body: JSON.stringify({
+            subscriptionId: params.subscriptionId,
+            connectedAccountId: owned.connected_account_id,
+            shippingAddress: params.shippingAddress,
+            nextBillingDate: params.nextBillingDate,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to update subscription",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(data, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to update subscription",
+          error instanceof Error ? error.message : "Unknown error",
+          startTime
+        );
+      }
+    }
+  );
+
+  registerTool(
+    server,
+    "enroll_in_email_flow",
+    "Manually enroll a recipient into one of your active email flows (welcome_series, abandoned_cart, post_purchase, or winback). Schedules step executions immediately.",
+    {
+      flowType: z
+        .enum(["welcome_series", "abandoned_cart", "post_purchase", "winback"])
+        .describe("Type of flow to enroll into (must already be active)"),
+      recipientEmail: z.string().email().describe("Recipient's email address"),
+      recipientPubkey: z
+        .string()
+        .optional()
+        .describe("Recipient's Nostr pubkey if known (optional)"),
+      enrollmentData: z
+        .record(z.any())
+        .optional()
+        .describe(
+          "Per-enrollment template variables merged into every step (e.g. { first_name: 'Alice' })"
+        ),
+    },
+    async (params) => {
+      const startTime = Date.now();
+      if (apiKey.permissions !== "full_access") return permissionError();
+      const signer = await getSigner(apiKey);
+      if (!signer) return noSignerError();
+
+      try {
+        const pubkey = signer.getPubKey();
+        const res = await fetch(`${baseUrl}/api/email/flows/enroll`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            flow_type: params.flowType,
+            seller_pubkey: pubkey,
+            recipient_email: params.recipientEmail,
+            recipient_pubkey: params.recipientPubkey ?? null,
+            enrollment_data: params.enrollmentData ?? {},
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return errorResponse(
+            "Failed to enroll in email flow",
+            data.error || "Unknown error",
+            startTime
+          );
+        }
+        return successResponse(data, startTime);
+      } catch (error) {
+        return errorResponse(
+          "Failed to enroll in email flow",
           error instanceof Error ? error.message : "Unknown error",
           startTime
         );

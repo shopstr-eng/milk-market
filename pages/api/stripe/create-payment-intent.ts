@@ -19,6 +19,16 @@ interface SellerSplit {
   // Legacy raw-amount field, kept for back-compat with any older callers.
   amount?: number;
   currency: string;
+  // Optional affiliate attribution — when present, the seller's share will be
+  // reduced by `affiliateRebateSmallest` and that amount will be transferred
+  // to `affiliateAccountId` (Stripe Connect) by process-transfers. If no
+  // account is connected we still record the rebate in metadata so it can
+  // accrue to the affiliate's balance.
+  affiliateRebateSmallest?: number;
+  affiliateAccountId?: string | null;
+  affiliateId?: number;
+  affiliateCodeId?: number;
+  affiliateCode?: string;
 }
 import { applyRateLimit } from "@/utils/rate-limit";
 import {
@@ -54,7 +64,35 @@ export default async function handler(
       productDescription,
       metadata,
       sellerSplits,
+      salesTaxSmallest,
+      taxCalculationId,
     } = req.body;
+
+    // Stripe metadata values are capped at 500 chars; truncate any long strings
+    // (e.g. productId list for large carts) so the API doesn't reject the call.
+    const safeMetadata: Record<string, string> = {};
+    if (metadata && typeof metadata === "object") {
+      for (const [k, v] of Object.entries(metadata)) {
+        if (v === undefined || v === null) continue;
+        const s = String(v);
+        safeMetadata[k] = s.length > 490 ? s.slice(0, 487) + "..." : s;
+      }
+    }
+
+    // Validate customer email format if provided — Stripe rejects malformed
+    // values and the resulting 400 surfaces as "invoice generation error".
+    let safeCustomerEmail: string | undefined;
+    if (customerEmail && typeof customerEmail === "string") {
+      const trimmed = customerEmail.trim();
+      if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+        safeCustomerEmail = trimmed;
+      }
+    }
+
+    const taxAddSmallest =
+      typeof salesTaxSmallest === "number" && salesTaxSmallest > 0
+        ? Math.ceil(salesTaxSmallest)
+        : 0;
 
     let amountInSmallestUnit: number;
     let stripeCurrency: string;
@@ -79,6 +117,11 @@ export default async function handler(
       accountId: string;
       donationPercent: number;
       donationCutSmallest: number;
+      affiliateRebateSmallest: number;
+      affiliateAccountId: string | null;
+      affiliateId: number | null;
+      affiliateCodeId: number | null;
+      affiliateCode: string | null;
     }[] = [];
 
     if (isMultiMerchant) {
@@ -142,6 +185,20 @@ export default async function handler(
           accountId,
           donationPercent,
           donationCutSmallest,
+          affiliateRebateSmallest:
+            typeof split.affiliateRebateSmallest === "number"
+              ? Math.max(
+                  0,
+                  Math.min(
+                    split.affiliateRebateSmallest,
+                    Math.max(splitAmountSmallest - donationCutSmallest - 1, 0)
+                  )
+                )
+              : 0,
+          affiliateAccountId: split.affiliateAccountId ?? null,
+          affiliateId: split.affiliateId ?? null,
+          affiliateCodeId: split.affiliateCodeId ?? null,
+          affiliateCode: split.affiliateCode ?? null,
         });
       }
 
@@ -152,9 +209,12 @@ export default async function handler(
       // sum-exceeds-total mismatch) and that the buyer is charged exactly
       // what each seller is owed in aggregate.
       const splitsSum = splitDetails.reduce((s, d) => s + d.amountCents, 0);
-      amountInSmallestUnit = Math.max(splitsSum, 50);
-    } else if (amountInSmallestUnit < 50) {
-      amountInSmallestUnit = 50;
+      amountInSmallestUnit = Math.max(splitsSum + taxAddSmallest, 50);
+    } else {
+      amountInSmallestUnit = amountInSmallestUnit + taxAddSmallest;
+      if (amountInSmallestUnit < 50) {
+        amountInSmallestUnit = 50;
+      }
     }
 
     if (isMultiMerchant) {
@@ -168,11 +228,17 @@ export default async function handler(
         description,
         transfer_group: transferGroup,
         metadata: {
-          ...metadata,
+          ...safeMetadata,
           originalAmount: amount.toString(),
           originalCurrency: currency,
           isMultiMerchant: "true",
           transferGroup,
+          ...(taxAddSmallest > 0 && {
+            salesTaxSmallest: taxAddSmallest.toString(),
+          }),
+          ...(taxCalculationId && {
+            taxCalculationId: String(taxCalculationId),
+          }),
           sellerSplits: JSON.stringify(
             splitDetails.map((s) => ({
               pubkey: s.pubkey,
@@ -180,22 +246,25 @@ export default async function handler(
               accountId: s.accountId,
               donationPercent: s.donationPercent,
               donationCutSmallest: s.donationCutSmallest,
+              affiliateRebateSmallest: s.affiliateRebateSmallest,
+              affiliateAccountId: s.affiliateAccountId,
+              affiliateId: s.affiliateId,
+              affiliateCodeId: s.affiliateCodeId,
+              affiliateCode: s.affiliateCode,
             }))
           ),
         },
-        automatic_payment_methods: {
-          enabled: true,
-        },
+        payment_method_types: ["card"],
       };
 
-      if (customerEmail) {
-        paymentIntentParams.receipt_email = customerEmail;
+      if (safeCustomerEmail) {
+        paymentIntentParams.receipt_email = safeCustomerEmail;
       }
 
       const intentRefMM = stableIdempotencyKey("mm", {
         amount: amountInSmallestUnit,
         currency: stripeCurrency,
-        customerEmail: customerEmail ?? null,
+        customerEmail: safeCustomerEmail ?? null,
         productTitle: productTitle ?? null,
         productDescription: productDescription ?? null,
         metadata: metadata ?? null,
@@ -239,6 +308,11 @@ export default async function handler(
           accountId: s.accountId,
           donationPercent: s.donationPercent,
           donationCutSmallest: s.donationCutSmallest,
+          affiliateRebateSmallest: s.affiliateRebateSmallest,
+          affiliateAccountId: s.affiliateAccountId,
+          affiliateId: s.affiliateId,
+          affiliateCodeId: s.affiliateCodeId,
+          affiliateCode: s.affiliateCode,
         })),
       });
     }
@@ -278,7 +352,7 @@ export default async function handler(
       currency: stripeCurrency,
       description,
       metadata: {
-        ...metadata,
+        ...safeMetadata,
         originalAmount: amount.toString(),
         originalCurrency: currency,
         ...(connectedAccountId && { connectedAccountId }),
@@ -286,23 +360,25 @@ export default async function handler(
           mmDonationPercent: singleDonationPercent.toString(),
           mmDonationCutSmallest: singleDonationCut.toString(),
         }),
+        ...(taxAddSmallest > 0 && {
+          salesTaxSmallest: taxAddSmallest.toString(),
+        }),
+        ...(taxCalculationId && { taxCalculationId: String(taxCalculationId) }),
       },
-      automatic_payment_methods: {
-        enabled: true,
-      },
+      payment_method_types: ["card"],
       ...(singleDonationCut > 0 && {
         application_fee_amount: singleDonationCut,
       }),
     };
 
-    if (customerEmail) {
-      paymentIntentParams.receipt_email = customerEmail;
+    if (safeCustomerEmail) {
+      paymentIntentParams.receipt_email = safeCustomerEmail;
     }
 
     const intentRef = stableIdempotencyKey("pi", {
       amount: amountInSmallestUnit,
       currency: stripeCurrency,
-      customerEmail: customerEmail ?? null,
+      customerEmail: safeCustomerEmail ?? null,
       productTitle: productTitle ?? null,
       productDescription: productDescription ?? null,
       metadata: metadata ?? null,

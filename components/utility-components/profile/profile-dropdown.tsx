@@ -22,8 +22,10 @@ import {
   UserIcon,
 } from "@heroicons/react/24/outline";
 import { useRouter } from "next/router";
+import NextLink from "next/link";
 import { SignerContext } from "@/components/utility-components/nostr-context-provider";
 import SignInModal from "../../sign-in/SignInModal";
+import { copyToClipboard } from "@/utils/clipboard";
 import { ProfileData } from "@/utils/types/types";
 
 import { GlobeAltIcon } from "@heroicons/react/24/outline";
@@ -160,6 +162,8 @@ export const ProfileWithDropdown = ({
 
   const profile = profileContext.profileData.get(pubkey);
   const profileContent = profile?.content ?? fetchedProfileContent;
+  const stallSlug =
+    shopMapContext.shopData.get(pubkey)?.content?.storefront?.shopSlug ?? null;
   const displayName = (() => {
     let name =
       profile?.content?.nip05 && profile.nip05Verified
@@ -170,6 +174,22 @@ export const ProfileWithDropdown = ({
   })();
   const pfp = profileContent?.picture || `https://robohash.org/${pubkey}`;
   const isNip05Verified = profile?.nip05Verified || false;
+
+  const shopHref = (() => {
+    if (stallSlug) return `/stall/${stallSlug}`;
+    const slug = getProfileSlug(pubkey, profileContext.profileData);
+    return `/marketplace/${slug}`;
+  })();
+  const storefrontHref = (() => {
+    const shopData = shopMapContext.shopData.get(pubkey);
+    const shopSlug = shopData?.content?.storefront?.shopSlug;
+    if (shopSlug) return `/stall/${shopSlug}`;
+    const slug = getProfileSlug(pubkey, profileContext.profileData);
+    return `/marketplace/${slug}`;
+  })();
+  const inquiryHref = isLoggedIn
+    ? `/orders?pk=${encodeURIComponent(npub)}&isInquiry=true`
+    : "";
 
   const DropDownItems: {
     [key in DropDownKeys]: DropdownItemProps & { label: string };
@@ -182,13 +202,14 @@ export const ProfileWithDropdown = ({
       startContent: (
         <BuildingStorefrontIcon className={"h-5 w-5 !text-black"} />
       ),
+      as: NextLink as unknown as DropdownItemProps["as"],
+      href: shopHref,
       onPress: () => {
         handleDropdownAction(() => {
-          const slug = getProfileSlug(pubkey, profileContext.profileData);
-          router.push(`/marketplace/${slug}`);
+          router.push(shopHref);
         });
       },
-      label: "Visit Seller",
+      label: stallSlug ? "Visit Stall" : "Visit Vendor",
     },
     storefront: {
       key: "storefront",
@@ -196,19 +217,14 @@ export const ProfileWithDropdown = ({
       className:
         "!text-black hover:!bg-blue-400 hover:!text-white font-bold data-[hover=true]:!bg-blue-400 data-[hover=true]:!text-white",
       startContent: <GlobeAltIcon className={"h-5 w-5 !text-black"} />,
+      as: NextLink as unknown as DropdownItemProps["as"],
+      href: storefrontHref,
       onPress: () => {
         handleDropdownAction(() => {
-          const shopData = shopMapContext.shopData.get(pubkey);
-          const shopSlug = shopData?.content?.storefront?.shopSlug;
-          if (shopSlug) {
-            router.push(`/shop/${shopSlug}`);
-          } else {
-            const slug = getProfileSlug(pubkey, profileContext.profileData);
-            router.push(`/marketplace/${slug}`);
-          }
+          router.push(storefrontHref);
         });
       },
-      label: "Visit Storefront",
+      label: "Visit Stall",
     },
     shop_profile: {
       key: "shop_profile",
@@ -218,12 +234,14 @@ export const ProfileWithDropdown = ({
       startContent: (
         <BuildingStorefrontIcon className={"h-5 w-5 !text-black"} />
       ),
+      as: NextLink as unknown as DropdownItemProps["as"],
+      href: "/settings/stall",
       onPress: () => {
         handleDropdownAction(() => {
-          router.push("/settings/shop-profile");
+          router.push("/settings/stall");
         });
       },
-      label: "Shop Profile",
+      label: "Manage Stall",
     },
     inquiry: {
       key: "inquiry",
@@ -233,6 +251,12 @@ export const ProfileWithDropdown = ({
       startContent: (
         <ChatBubbleBottomCenterIcon className={"h-5 w-5 !text-black"} />
       ),
+      ...(isLoggedIn
+        ? {
+            as: NextLink as unknown as DropdownItemProps["as"],
+            href: inquiryHref,
+          }
+        : {}),
       onPress: () => {
         handleDropdownAction(() => {
           if (isLoggedIn) {
@@ -253,12 +277,14 @@ export const ProfileWithDropdown = ({
       className:
         "!text-black hover:!bg-blue-400 hover:!text-white font-bold data-[hover=true]:!bg-blue-400 data-[hover=true]:!text-white",
       startContent: <UserIcon className={"h-5 w-5 !text-black"} />,
+      as: NextLink as unknown as DropdownItemProps["as"],
+      href: "/settings/market-profile",
       onPress: () => {
         handleDropdownAction(() => {
-          router.push("/settings/user-profile");
+          router.push("/settings/market-profile");
         });
       },
-      label: "Profile",
+      label: "Edit Profile",
     },
     settings: {
       key: "settings",
@@ -266,12 +292,14 @@ export const ProfileWithDropdown = ({
       className:
         "!text-black hover:!bg-blue-400 hover:!text-white font-bold data-[hover=true]:!bg-blue-400 data-[hover=true]:!text-white",
       startContent: <Cog6ToothIcon className={"h-5 w-5 !text-black"} />,
+      as: NextLink as unknown as DropdownItemProps["as"],
+      href: "/settings",
       onPress: () => {
         handleDropdownAction(() => {
           router.push("/settings");
         });
       },
-      label: "Settings",
+      label: "View Settings",
     },
     logout: {
       key: "logout",
@@ -306,10 +334,10 @@ export const ProfileWithDropdown = ({
         handleDropdownAction(async () => {
           try {
             const npub = nip19.npubEncode(pubkey);
-            if (!navigator.clipboard?.writeText) {
+            const ok = await copyToClipboard(npub);
+            if (!ok) {
               throw new Error("Clipboard API is not available");
             }
-            await navigator.clipboard.writeText(npub);
             setIsNPubCopied(true);
             setTimeout(() => {
               setIsNPubCopied(false);

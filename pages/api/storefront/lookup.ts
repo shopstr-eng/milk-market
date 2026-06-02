@@ -18,6 +18,14 @@ export default async function handler(
 
   if (!applyRateLimit(req, res, "storefront-lookup", RATE_LIMIT)) return;
 
+  // Mirror the service-worker's NetworkOnly rule for `/api/storefront/*`
+  // at the HTTP layer too. Prevents intermediaries (browser HTTP cache,
+  // CDNs, corp proxies) from caching a stale 404 from before the seller's
+  // domain was verified or their slug was registered — which would
+  // otherwise make a freshly-configured custom domain look permanently
+  // misconfigured for the cache lifetime.
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+
   const { slug, domain } = req.query;
 
   try {
@@ -43,7 +51,7 @@ export default async function handler(
       if (result.rows.length > 0) {
         return res.status(200).json({ pubkey: result.rows[0].pubkey });
       }
-      return res.status(404).json({ error: "Shop not found" });
+      return res.status(404).json({ error: "Stall not found" });
     }
 
     return res.status(400).json({ error: "slug or domain parameter required" });

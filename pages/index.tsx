@@ -179,7 +179,7 @@ export default function StandaloneLanding() {
           text: data.error || "Something went wrong! Please try again.",
         });
       }
-    } catch (error) {
+    } catch {
       setSubmitMessage({
         type: "error",
         text: "Network error! Please check your connection and try again.",
@@ -540,7 +540,7 @@ export default function StandaloneLanding() {
         <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
           <div className="mb-12 text-center">
             <h2 className="mb-4 text-3xl font-black md:text-4xl">
-              Why Farmers and Buyers Choose Us
+              Why Farmers and Shoppers Choose Us
             </h2>
             <p className="mx-auto max-w-2xl text-zinc-600">
               Direct food sales from farms reached{" "}
@@ -858,6 +858,12 @@ export default function StandaloneLanding() {
               </Link>
               <Link href="/producer-guide" className="text-sm hover:underline">
                 Producer Guide
+              </Link>
+              <Link
+                href="/onboarding/new-account?migrate=shopify"
+                className="text-sm hover:underline"
+              >
+                Migrate from Shopify
               </Link>
             </div>
             <div className="mb-6 flex flex-wrap items-center justify-center gap-6">

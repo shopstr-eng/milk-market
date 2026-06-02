@@ -1,4 +1,5 @@
-import type { AppProps } from "next/app";
+import type { AppProps, AppContext } from "next/app";
+import NextApp from "next/app";
 import "../styles/globals.css";
 import { useState, useEffect, useCallback, useContext, useRef } from "react";
 import { useRouter } from "next/router";
@@ -45,6 +46,7 @@ import {
   fetchAllCommunities,
   fetchGiftWrappedChatsAndMessages,
   fetchStorefrontData,
+  fetchStorefrontChats,
 } from "@/utils/nostr/fetch-service";
 import {
   NostrEvent,
@@ -55,6 +57,8 @@ import {
 } from "../utils/types/types";
 import { Proof } from "@cashu/cashu-ts";
 import TopNav from "@/components/nav-top";
+import StorefrontThemeWrapper from "@/components/storefront/storefront-theme-wrapper";
+import { CustomDomainProvider } from "@/utils/storefront/custom-domain-context";
 import PageLoadingBar from "@/components/page-loading-bar";
 import DynamicHead from "../components/dynamic-meta-head";
 import StructuredData from "../components/structured-data";
@@ -66,7 +70,26 @@ import {
 } from "@/components/utility-components/nostr-context-provider";
 import { retryFailedRelayPublishes } from "@/utils/nostr/retry-service";
 import { MintRecoveryBoot } from "@/components/utility-components/mint-recovery-boot";
+import AffiliateRefTracker from "@/components/utility-components/affiliate-ref-tracker";
 import { NostrManager } from "@/utils/nostr/nostr-manager";
+
+// Run a callback after the browser has had a chance to paint, yielding the
+// main thread first so the visible UI shows before heavy work (e.g. decrypting
+// the full gift-wrapped message history) begins.
+const scheduleAfterPaint = (cb: () => void) => {
+  if (typeof window === "undefined") {
+    cb();
+    return;
+  }
+  const ric = (window as any).requestIdleCallback as
+    | ((callback: () => void, options?: { timeout: number }) => number)
+    | undefined;
+  if (ric) {
+    ric(cb, { timeout: 2000 });
+  } else {
+    setTimeout(cb, 200);
+  }
+};
 
 function MilkMarket({ props }: { props: AppProps }) {
   const { Component, pageProps } = props;
@@ -498,22 +521,156 @@ function MilkMarket({ props }: { props: AppProps }) {
   const [focusedPubkey, setFocusedPubkey] = useState("");
   const [selectedSection, setSelectedSection] = useState("");
   const [fullLoadComplete, setFullLoadComplete] = useState(false);
+  // Seed `storefrontLoadPubkey` from the SSR signal that middleware injects
+  // via `x-mm-shop-pubkey` (see proxy.ts + utils/storefront/host-cache.ts).
+  // Without this seed the page mounts once with the bare <Component/>,
+  // then `setStorefrontLoadPubkey(sfPubkey)` fires from an effect ~100ms
+  // later, the wrapper mounts, and React remounts the page subtree inside
+  // it. On Safari with the old aggressive service worker that remount was
+  // visible as a blank screen.
+  const ssrShopPubkey: string | null =
+    props.pageProps?.__customDomainShopPubkey ?? null;
   const [storefrontLoadPubkey, setStorefrontLoadPubkey] = useState<
     string | null
-  >(null);
+  >(ssrShopPubkey);
 
   const router = useRouter();
   const initializationRunRef = useRef(0);
+  // Token guarding deferred storefront chat fetches. It is bumped on every
+  // schedule AND at the top of the main init effect (auth/signer/relay change),
+  // so a slow message fetch from a previous shop — or a previous signed-in
+  // user — can never overwrite the chat context after the user has moved on.
+  const storefrontChatRunRef = useRef(0);
 
-  const isStorefrontRoute = router.pathname.startsWith("/shop/");
-
-  const currentStorefrontSlug = isStorefrontRoute
-    ? decodeURIComponent(
-        (
-          (router.asPath ?? "").replace(/^\/shop\//, "").split("/")[0] ?? ""
-        ).split("?")[0] ?? ""
+  // Fetch the signed-in user's gift-wrapped messages for a storefront AFTER the
+  // page has painted, then hydrate any missing counterparty profiles. Kept off
+  // the initial render path because decrypting the full message history is the
+  // slow part of loading a custom stall/domain page when signed in.
+  const scheduleStorefrontChatFetch = (
+    sfPubkey: string,
+    userPubkey: string,
+    allRelays: string[]
+  ) => {
+    if (!nostr || !signer) return;
+    const token = ++storefrontChatRunRef.current;
+    scheduleAfterPaint(() => {
+      if (storefrontChatRunRef.current !== token) return;
+      const guardedEditChat = (chatsMap: ChatsMap, isLoading: boolean) => {
+        if (storefrontChatRunRef.current !== token) return;
+        editChatContext(chatsMap, isLoading);
+      };
+      fetchStorefrontChats(
+        nostr!,
+        signer!,
+        allRelays,
+        sfPubkey,
+        userPubkey,
+        guardedEditChat
       )
-    : null;
+        .then((profileSet) => {
+          if (storefrontChatRunRef.current !== token) return;
+          const missing = Array.from(profileSet).filter(
+            (pk) => !profileContext.profileData.has(pk)
+          );
+          if (missing.length > 0) {
+            fetchProfile(
+              nostr!,
+              allRelays,
+              missing,
+              editProfileContext,
+              profileContext.profileData
+            ).catch((error) =>
+              console.error(
+                "Error fetching deferred storefront chat profiles:",
+                error
+              )
+            );
+          }
+        })
+        .catch((error) =>
+          console.error("Error during deferred storefront chat fetch:", error)
+        );
+    });
+  };
+
+  // Detect when the visitor is on a seller's custom domain (anything that
+  // isn't milk.market, *.milk.market, *.replit.app, *.replit.dev, *.repl.co,
+  // or localhost). On a custom domain we suppress the Milk Market TopNav and
+  // wrap the page in the seller's storefront chrome (nav + footer + theme).
+  //
+  // The initial value comes from middleware-set request headers via
+  // App.getInitialProps, so the first SSR render is already correct (no
+  // platform-chrome flash before client hydration).
+  // Middleware injects __isCustomDomainSsr / __customDomainShopSlug into
+  // pageProps via App.getInitialProps below. When that signal is present we
+  // mark domainState.isResolved = true on the very first render so consumers
+  // (CustomDomainProvider, links, the theme wrapper) can render the correct
+  // hrefs immediately — no post-hydration flip, no tree-shape change.
+  //
+  // The follow-up useEffect only runs if the SSR signal disagreed with the
+  // client's hostname (e.g. middleware missing in dev) and corrects it once.
+  const ssrIsCustomDomain = props.pageProps?.__isCustomDomainSsr === true;
+  const ssrShopSlug: string | null =
+    props.pageProps?.__customDomainShopSlug ?? null;
+  const hasSsrCustomDomainSignal =
+    props.pageProps?.__isCustomDomainSsr !== undefined;
+  const [domainState, setDomainState] = useState<{
+    isCustomDomain: boolean;
+    isResolved: boolean;
+  }>({
+    isCustomDomain: ssrIsCustomDomain,
+    isResolved: hasSsrCustomDomainSignal,
+  });
+  const { isCustomDomain: isCustomDomainVisit } = domainState;
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const host = window.location.hostname.toLowerCase();
+    if (!host) return;
+    const PLATFORM_EXACT = new Set(["localhost", "127.0.0.1", "0.0.0.0"]);
+    let detected: boolean;
+    if (PLATFORM_EXACT.has(host)) {
+      detected = false;
+    } else {
+      const PLATFORM_SUFFIXES = [
+        "milk.market",
+        "replit.app",
+        "replit.dev",
+        "repl.co",
+      ];
+      const isPlatform = PLATFORM_SUFFIXES.some(
+        (s) => host === s || host.endsWith("." + s)
+      );
+      detected = !isPlatform;
+    }
+    setDomainState((prev) => {
+      if (prev.isCustomDomain === detected && prev.isResolved) return prev;
+      return { isCustomDomain: detected, isResolved: true };
+    });
+  }, []);
+
+  // Stall-scoped routes can be served either by /pages/stall/** directly or
+  // by Next.js rewrites (e.g. /stall/<slug>/listing/<id> -> /listing/<id>,
+  // /stall/<slug>/cart -> /cart). In the rewrite case `router.pathname` is
+  // the destination page, so we also need to inspect `router.asPath` (the
+  // user-visible URL) to detect a stall context. Without this the storefront
+  // fast-path fetch never runs and the theme wrapper has no shop data to
+  // render against, so the custom nav / fonts / neo shadows never appear.
+  const isStorefrontRoute =
+    router.pathname.startsWith("/stall/") ||
+    (router.asPath ?? "").startsWith("/stall/") ||
+    (isCustomDomainVisit && !!ssrShopSlug);
+
+  const currentStorefrontSlug =
+    router.pathname.startsWith("/stall/") ||
+    (router.asPath ?? "").startsWith("/stall/")
+      ? decodeURIComponent(
+          (
+            (router.asPath ?? "").replace(/^\/stall\//, "").split("/")[0] ?? ""
+          ).split("?")[0] ?? ""
+        )
+      : isCustomDomainVisit && ssrShopSlug
+        ? ssrShopSlug
+        : null;
 
   useEffect(() => {
     if (
@@ -559,9 +716,21 @@ function MilkMarket({ props }: { props: AppProps }) {
   };
 
   const resolveStorefrontPubkey = async (): Promise<string | null> => {
-    const shopPath = router.asPath.replace(/^\/shop\//, "").split("/")[0] ?? "";
-    if (!shopPath) return null;
-    const slug = decodeURIComponent(shopPath.split("?")[0] ?? "");
+    let slug: string | null = null;
+
+    const stallPath =
+      router.asPath.replace(/^\/stall\//, "").split("/")[0] ?? "";
+    if (stallPath) {
+      slug = decodeURIComponent(stallPath.split("?")[0] ?? "");
+    }
+
+    // Custom-domain visit: the URL has no /stall/<slug> prefix, but
+    // middleware passed the slug along via getInitialProps so the
+    // storefront fast-path can still resolve the seller's pubkey.
+    if (!slug && isCustomDomainVisit && ssrShopSlug) {
+      slug = ssrShopSlug;
+    }
+
     if (!slug) return null;
 
     try {
@@ -581,6 +750,10 @@ function MilkMarket({ props }: { props: AppProps }) {
     async function fetchData() {
       const runId = ++initializationRunRef.current;
       const isCurrentRun = () => runId === initializationRunRef.current;
+      // Invalidate any deferred storefront chat fetch queued by a previous
+      // init run (e.g. before an account switch / logout) so it can't repopulate
+      // the chat context with the prior session's messages.
+      storefrontChatRunRef.current++;
       type EditorFn = (...args: any[]) => void;
 
       const guard = <TFn extends EditorFn>(fn: TFn) => {
@@ -717,19 +890,22 @@ function MilkMarket({ props }: { props: AppProps }) {
                 guardedEditProfileContext,
                 guardedEditReviewsContext,
                 guardedEditCommunityContext,
-                isLoggedIn && userPubkey
-                  ? {
-                      signer: signer!,
-                      editChatContext: guardedEditChatContext,
-                      userPubkey,
-                    }
-                  : undefined
+                isLoggedIn && userPubkey ? { userPubkey } : undefined
               );
             } catch (error) {
               console.error("Error during focused storefront fetch:", error);
             }
 
             if (!isCurrentRun()) return;
+
+            // Defer the heavy gift-wrapped message fetch + decryption until
+            // after the storefront has painted. Decrypting the full message
+            // history (two signer.decrypt calls per wrap) would otherwise
+            // block the initial render for signed-in users on custom domains
+            // and stall routes.
+            if (isLoggedIn && userPubkey) {
+              scheduleStorefrontChatFetch(sfPubkey, userPubkey, allRelays);
+            }
 
             const blossomPromise = isLoggedIn
               ? runTask(
@@ -795,6 +971,19 @@ function MilkMarket({ props }: { props: AppProps }) {
         }
 
         // Full parallelized load (non-storefront path, or storefront with fullLoadComplete)
+        const initialUserProfileFetch =
+          isLoggedIn && userPubkey
+            ? fetchProfile(
+                nostr!,
+                allRelays,
+                [userPubkey],
+                guardedEditProfileContext,
+                profileContext.profileData
+              ).catch((error) => {
+                console.error("Error fetching current user profile:", error);
+              })
+            : Promise.resolve();
+
         // We just fire them and not await them so that they just update their context and not block others
         const blossomPromise = runTask(
           "fetching blossom servers",
@@ -887,6 +1076,8 @@ function MilkMarket({ props }: { props: AppProps }) {
         }
 
         const pubkeysToFetchProfilesFor = Array.from(pubkeySet);
+
+        await initialUserProfileFetch;
 
         // These start immediately — no waiting for wallet, blossom, follows, or communities.
         await Promise.all([
@@ -1022,12 +1213,16 @@ function MilkMarket({ props }: { props: AppProps }) {
           editProfileContext,
           editReviewsContext,
           editCommunityContext,
-          isLoggedIn && userPubkey
-            ? { signer: signer!, editChatContext, userPubkey }
-            : undefined
+          isLoggedIn && userPubkey ? { userPubkey } : undefined
         );
       } catch (error) {
         console.error("Error during storefront-to-storefront refetch:", error);
+      }
+
+      // Defer the heavy message fetch + decryption until after the new
+      // storefront has painted (see fast-path note above).
+      if (isLoggedIn && userPubkey) {
+        scheduleStorefrontChatFetch(sfPubkey, userPubkey, allRelays);
       }
     };
 
@@ -1286,9 +1481,14 @@ function MilkMarket({ props }: { props: AppProps }) {
         shopEvents={shopContext.shopData}
         profileData={profileContext.profileData}
         ssrOgMeta={pageProps?.ogMeta || null}
+        isCustomDomain={isCustomDomainVisit}
+        customDomainShopPubkey={
+          isCustomDomainVisit ? storefrontLoadPubkey || ssrShopPubkey : null
+        }
       />
       <StructuredData />
       <PageLoadingBar />
+      <AffiliateRefTracker storefrontPubkey={storefrontLoadPubkey} />
       <RelaysContext.Provider value={relaysContext}>
         <BlossomContext.Provider value={blossomContext}>
           <CashuWalletContext.Provider value={cashuWalletContext}>
@@ -1310,14 +1510,16 @@ function MilkMarket({ props }: { props: AppProps }) {
                             } as ChatsContextInterface
                           }
                         >
-                          {router.pathname !== "/" &&
+                          {!isCustomDomainVisit &&
+                            router.pathname !== "/" &&
                             router.pathname !== "/producer-guide" &&
                             router.pathname !== "/faq" &&
                             router.pathname !== "/terms" &&
                             router.pathname !== "/privacy" &&
                             router.pathname !== "/about" &&
                             router.pathname !== "/contact" &&
-                            !router.pathname.startsWith("/shop/") && (
+                            !router.pathname.startsWith("/stall/") &&
+                            !(router.asPath ?? "").startsWith("/stall/") && (
                               <TopNav
                                 setFocusedPubkey={setFocusedPubkey}
                                 setSelectedSection={setSelectedSection}
@@ -1325,13 +1527,55 @@ function MilkMarket({ props }: { props: AppProps }) {
                             )}
                           <div className="flex">
                             <main className="flex-1">
-                              <Component
-                                {...pageProps}
-                                focusedPubkey={focusedPubkey}
-                                setFocusedPubkey={setFocusedPubkey}
-                                selectedSection={selectedSection}
-                                setSelectedSection={setSelectedSection}
-                              />
+                              <CustomDomainProvider
+                                value={domainState.isCustomDomain}
+                                isResolved={domainState.isResolved}
+                              >
+                                {storefrontLoadPubkey ? (
+                                  <StorefrontThemeWrapper
+                                    sellerPubkey={storefrontLoadPubkey}
+                                    // Wrapper internally decides whether to render storefront chrome
+                                    // based on isCustomDomain — but its mount/unmount is stable.
+                                    //
+                                    // Suppress chrome for /stall/* pages: they render
+                                    // <StorefrontLayout> themselves, which already paints
+                                    // its own nav + footer. Wrapping them in another set
+                                    // of chrome doubled the footer (and nav) on custom
+                                    // domains once the SSR pubkey seed started populating
+                                    // `storefrontLoadPubkey` on first render. The
+                                    // `useInsideStorefrontChrome` guard inside the wrapper
+                                    // only catches nested <StorefrontThemeWrapper> calls
+                                    // (e.g. /listing, /cart), not StorefrontLayout.
+                                    renderChrome={
+                                      domainState.isCustomDomain &&
+                                      !router.pathname.startsWith("/stall/")
+                                    }
+                                  >
+                                    {/* Stable key on both branches so if
+                                                  the wrapper ever flips in/out
+                                                  (e.g. _error.tsx paths) React
+                                                  treats the page as the same
+                                                  element instead of remounting. */}
+                                    <Component
+                                      key="page"
+                                      {...pageProps}
+                                      focusedPubkey={focusedPubkey}
+                                      setFocusedPubkey={setFocusedPubkey}
+                                      selectedSection={selectedSection}
+                                      setSelectedSection={setSelectedSection}
+                                    />
+                                  </StorefrontThemeWrapper>
+                                ) : (
+                                  <Component
+                                    key="page"
+                                    {...pageProps}
+                                    focusedPubkey={focusedPubkey}
+                                    setFocusedPubkey={setFocusedPubkey}
+                                    selectedSection={selectedSection}
+                                    setSelectedSection={setSelectedSection}
+                                  />
+                                )}
+                              </CustomDomainProvider>
                             </main>
                           </div>
                         </ChatsContext.Provider>
@@ -1364,5 +1608,40 @@ function App(props: AppProps) {
     </>
   );
 }
+
+// Read middleware-injected custom-domain headers on the server so the very
+// first SSR render of every page already knows whether it's serving a
+// seller's custom domain (and which seller). This is what eliminates the
+// "platform TopNav flash" before client-side detection kicks in, and lets
+// the page boot into the storefront chrome without a layout swap.
+App.getInitialProps = async (appContext: AppContext) => {
+  const appProps = await NextApp.getInitialProps(appContext);
+  const req = appContext.ctx.req as
+    | (typeof appContext.ctx.req & {
+        headers: Record<string, string | string[] | undefined>;
+      })
+    | undefined;
+  const headers = req?.headers ?? {};
+  const headerVal = (name: string): string | null => {
+    const v = headers[name];
+    if (Array.isArray(v)) return v[0] ?? null;
+    return typeof v === "string" ? v : null;
+  };
+  const isCustomDomainSsr = headerVal("x-mm-custom-domain") === "1";
+  const customDomainShopSlug = headerVal("x-mm-shop-slug");
+  // Also forward the pubkey so the client can seed `storefrontLoadPubkey`
+  // synchronously on the first render and avoid a post-hydration remount
+  // when the wrapper appears around <Component/>.
+  const customDomainShopPubkey = headerVal("x-mm-shop-pubkey");
+  return {
+    ...appProps,
+    pageProps: {
+      ...(appProps as { pageProps?: Record<string, unknown> }).pageProps,
+      __isCustomDomainSsr: isCustomDomainSsr,
+      __customDomainShopSlug: customDomainShopSlug,
+      __customDomainShopPubkey: customDomainShopPubkey,
+    },
+  };
+};
 
 export default App;

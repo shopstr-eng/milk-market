@@ -43,7 +43,10 @@ export default function EditListingScreen() {
       return;
     }
 
-    const nextDraft = findSellerListingDraft(listingEventsQuery.data, listingId);
+    const nextDraft = findSellerListingDraft(
+      listingEventsQuery.data,
+      listingId
+    );
     setDraft((currentDraft) => currentDraft ?? nextDraft);
   }, [listingEventsQuery.data, listingId]);
 
