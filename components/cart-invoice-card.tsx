@@ -20,15 +20,8 @@ import {
   SelectItem,
   Input,
   Spinner,
+  Checkbox,
 } from "@heroui/react";
-import {
-  BanknotesIcon,
-  BoltIcon,
-  CheckIcon,
-  ClipboardIcon,
-  CurrencyDollarIcon,
-  WalletIcon,
-} from "@heroicons/react/24/outline";
 import {
   Mint as CashuMint,
   Wallet as CashuWallet,
@@ -59,10 +52,12 @@ import {
   constructGiftWrappedEvent,
   constructMessageSeal,
   constructMessageGiftWrap,
+  getSavedAddresses,
   sendGiftWrappedMessageEvent,
   generateKeys,
   getLocalStorageData,
   publishProofEvent,
+  saveAddress,
 } from "@/utils/nostr/nostr-helper-functions";
 import { LightningAddress } from "@getalby/lightning-tools";
 import QRCode from "qrcode";
@@ -76,6 +71,7 @@ import { BLUEBUTTONCLASSNAMES } from "@/utils/STATIC-VARIABLES";
 import SignInModal from "./sign-in/SignInModal";
 import FailureModal from "@/components/utility-components/failure-modal";
 import CountryDropdown from "./utility-components/dropdowns/country-dropdown";
+import AddressPicker from "./utility-components/address-picker";
 import {
   NostrContext,
   SignerContext,
@@ -84,6 +80,7 @@ import {
   ShippingFormData,
   ContactFormData,
   CombinedFormData,
+  SavedAddress,
   ShopProfile,
 } from "@/utils/types/types";
 import { Controller } from "react-hook-form";
@@ -243,6 +240,12 @@ export default function CartInvoiceCard({
 
   const [paymentConfirmed, setPaymentConfirmed] = useState(false);
   const [qrCodeUrl, setQrCodeUrl] = useState<string | null>(null);
+  const [saveDetails, setSaveDetails] = useState(false);
+  const [saveAddressLabel, setSaveAddressLabel] = useState("");
+  const [selectedSavedAddressId, setSelectedSavedAddressId] = useState<
+    string | null
+  >(null);
+  const [savedAddresses, setSavedAddresses] = useState<SavedAddress[]>([]);
   const [invoice, setInvoice] = useState("");
   const [copiedToClipboard, setCopiedToClipboard] = useState(false);
   // Wall-clock deadline (ms) the Lightning polling loop will give up at; null
@@ -406,6 +409,8 @@ export default function CartInvoiceCard({
     selectedSize?: string;
     selectedVolume?: string;
     selectedWeight?: string;
+    selectedVariant?: string;
+    variantLabel?: string;
     selectedBulkOption?: string;
     donationAmount?: number;
     donationPercentage?: number;
@@ -438,6 +443,8 @@ export default function CartInvoiceCard({
     selectedSize?: string;
     selectedVolume?: string;
     selectedWeight?: string;
+    selectedVariant?: string;
+    variantLabel?: string;
     selectedBulkOption?: string;
     includeBuyerEmail?: boolean;
     subscriptionFrequency?: string;
@@ -469,6 +476,8 @@ export default function CartInvoiceCard({
           selectedSize: params.selectedSize,
           selectedVolume: params.selectedVolume,
           selectedWeight: params.selectedWeight,
+          selectedVariant: params.selectedVariant,
+          variantLabel: params.variantLabel,
           selectedBulkOption: params.selectedBulkOption,
           subscriptionFrequency: params.subscriptionFrequency,
           productId: params.productId,
@@ -574,6 +583,8 @@ export default function CartInvoiceCard({
         selectedSize: p.selectedSize || undefined,
         selectedVolume: p.selectedVolume || undefined,
         selectedWeight: p.selectedWeight || undefined,
+        selectedVariant: p.selectedVariant || undefined,
+        variantLabel: p.variantLabel || undefined,
         selectedBulkOption: p.selectedBulkOption
           ? String(p.selectedBulkOption)
           : undefined,
@@ -875,6 +886,7 @@ export default function CartInvoiceCard({
     handleSubmit: handleFormSubmit,
     control: formControl,
     watch,
+    setValue,
   } = useForm();
 
   // Watch form values to validate completion
@@ -1419,6 +1431,30 @@ export default function CartInvoiceCard({
     }
   }, [products]);
 
+  useEffect(() => {
+    const loadSavedAddresses = () => {
+      setSavedAddresses(getSavedAddresses());
+    };
+
+    loadSavedAddresses();
+    window.addEventListener("storage", loadSavedAddresses);
+
+    return () => {
+      window.removeEventListener("storage", loadSavedAddresses);
+    };
+  }, []);
+
+  const applySavedAddress = (address: SavedAddress) => {
+    setValue("Name", address.name);
+    setValue("Address", address.address);
+    setValue("Unit", address.unit || "");
+    setValue("City", address.city);
+    setValue("Postal Code", address.zip);
+    setValue("State/Province", address.state);
+    setValue("Country", address.country);
+    setSelectedSavedAddressId(address.id);
+  };
+
   // Check if any products have pickup locations
   const productsWithPickupLocations = useMemo(() => {
     return products.filter(
@@ -1618,6 +1654,7 @@ export default function CartInvoiceCard({
         watchedValues["Postal Code"]?.trim() &&
         watchedValues["State/Province"]?.trim() &&
         watchedValues.Country?.trim() &&
+        (!saveDetails || saveAddressLabel.trim()) &&
         (!requiredInfo || watchedValues.Required?.trim()) &&
         pickupLocationValid
       );
@@ -1631,6 +1668,7 @@ export default function CartInvoiceCard({
         watchedValues["Postal Code"]?.trim() &&
         watchedValues["State/Province"]?.trim() &&
         watchedValues.Country?.trim() &&
+        (!saveDetails || saveAddressLabel.trim()) &&
         (!requiredInfo || watchedValues.Required?.trim()) &&
         pickupLocationValid
       );
@@ -1643,6 +1681,8 @@ export default function CartInvoiceCard({
     requiredInfo,
     productsWithPickupLocations,
     shippingPickupPreference,
+    saveDetails,
+    saveAddressLabel,
   ]);
 
   const generateNewKeys = async () => {
@@ -1839,6 +1879,8 @@ export default function CartInvoiceCard({
         selectedSize: product.selectedSize,
         selectedVolume: product.selectedVolume,
         selectedWeight: product.selectedWeight,
+        selectedVariant: product.selectedVariant,
+        variantLabel: product.variantLabel,
         selectedBulkOption: product.selectedBulkOption,
         subscriptionInfo,
       };
@@ -1866,6 +1908,8 @@ export default function CartInvoiceCard({
         selectedSize: product.selectedSize,
         selectedVolume: product.selectedVolume,
         selectedWeight: product.selectedWeight,
+        selectedVariant: product.selectedVariant,
+        variantLabel: product.variantLabel,
         selectedBulkOption: product.selectedBulkOption,
       };
     } else if (isDonation) {
@@ -1906,6 +1950,8 @@ export default function CartInvoiceCard({
         selectedSize: product.selectedSize,
         selectedVolume: product.selectedVolume,
         selectedWeight: product.selectedWeight,
+        selectedVariant: product.selectedVariant,
+        variantLabel: product.variantLabel,
         selectedBulkOption: product.selectedBulkOption,
       };
     }
@@ -2057,6 +2103,26 @@ export default function CartInvoiceCard({
         };
       }
 
+      if (
+        saveDetails &&
+        (formType === "shipping" || formType === "combined") &&
+        paymentData.shippingName &&
+        paymentData.shippingAddress
+      ) {
+        saveAddress({
+          id: selectedSavedAddressId || undefined,
+          name: paymentData.shippingName,
+          address: paymentData.shippingAddress,
+          unit: paymentData.shippingUnitNo || "",
+          city: paymentData.shippingCity,
+          state: paymentData.shippingState,
+          zip: paymentData.shippingPostalCode,
+          country: paymentData.shippingCountry,
+          label: saveAddressLabel.trim(),
+          isDefault: false,
+        });
+      }
+
       if (paymentType === "fiat") {
         setPendingPaymentData(paymentData);
         if (isSingleSeller) {
@@ -2118,6 +2184,10 @@ export default function CartInvoiceCard({
               if (p.selectedSize) parts.push(`Size: ${p.selectedSize}`);
               if (p.selectedVolume) parts.push(`Volume: ${p.selectedVolume}`);
               if (p.selectedWeight) parts.push(`Weight: ${p.selectedWeight}`);
+              if (p.selectedVariant)
+                parts.push(
+                  `${p.variantLabel || "Option"}: ${p.selectedVariant}`
+                );
               if (p.selectedBulkOption)
                 parts.push(`Bundle: ${p.selectedBulkOption} units`);
               const qty = quantities[p.id];
@@ -2578,11 +2648,14 @@ export default function CartInvoiceCard({
               product.selectedSize ||
               product.selectedVolume ||
               product.selectedWeight ||
+              product.selectedVariant ||
               product.selectedBulkOption
                 ? {
                     size: product.selectedSize || undefined,
                     volume: product.selectedVolume || undefined,
                     weight: product.selectedWeight || undefined,
+                    selectedVariant: product.selectedVariant || undefined,
+                    variantLabel: product.variantLabel || undefined,
                     bulk: product.selectedBulkOption || undefined,
                   }
                 : undefined,
@@ -4245,6 +4318,14 @@ export default function CartInvoiceCard({
                   productDetails += " weighing " + product.selectedWeight;
                 }
               }
+              if (product.selectedVariant) {
+                productDetails +=
+                  " (" +
+                  (product.variantLabel || "Option") +
+                  ": " +
+                  product.selectedVariant +
+                  ")";
+              }
               if (product.selectedBulkOption) {
                 if (productDetails) {
                   productDetails +=
@@ -4401,6 +4482,14 @@ export default function CartInvoiceCard({
                   productDetails += " weighing " + product.selectedWeight;
                 }
               }
+              if (product.selectedVariant) {
+                productDetails +=
+                  " (" +
+                  (product.variantLabel || "Option") +
+                  ": " +
+                  product.selectedVariant +
+                  ")";
+              }
               if (product.selectedBulkOption) {
                 if (productDetails) {
                   productDetails +=
@@ -4497,6 +4586,14 @@ export default function CartInvoiceCard({
             } else {
               productDetails += " weighing " + product.selectedWeight;
             }
+          }
+          if (product.selectedVariant) {
+            productDetails +=
+              " (" +
+              (product.variantLabel || "Option") +
+              ": " +
+              product.selectedVariant +
+              ")";
           }
           if (product.selectedBulkOption) {
             if (productDetails) {
@@ -4826,6 +4923,14 @@ export default function CartInvoiceCard({
                 productDetails += " weighing " + product.selectedWeight;
               }
             }
+            if (product.selectedVariant) {
+              productDetails +=
+                " (" +
+                (product.variantLabel || "Option") +
+                ": " +
+                product.selectedVariant +
+                ")";
+            }
             if (product.selectedBulkOption) {
               if (productDetails) {
                 productDetails +=
@@ -4978,6 +5083,14 @@ export default function CartInvoiceCard({
               productDetails += " weighing " + product.selectedWeight;
             }
           }
+          if (product.selectedVariant) {
+            productDetails +=
+              " (" +
+              (product.variantLabel || "Option") +
+              ": " +
+              product.selectedVariant +
+              ")";
+          }
           if (product.selectedBulkOption) {
             if (productDetails) {
               productDetails +=
@@ -5057,6 +5170,14 @@ export default function CartInvoiceCard({
             } else {
               productDetails += " weighing " + product.selectedWeight;
             }
+          }
+          if (product.selectedVariant) {
+            productDetails +=
+              " (" +
+              (product.variantLabel || "Option") +
+              ": " +
+              product.selectedVariant +
+              ")";
           }
           if (product.selectedBulkOption) {
             if (productDetails) {
@@ -5626,6 +5747,15 @@ export default function CartInvoiceCard({
       <div className="space-y-4">
         {(formType === "shipping" || formType === "combined") && (
           <>
+            {savedAddresses.length > 0 && (
+              <AddressPicker
+                compact
+                autoSelect={false}
+                allowInlineAdd={false}
+                onSelect={applySavedAddress}
+              />
+            )}
+
             <Controller
               name="Name"
               control={formControl}
@@ -5862,6 +5992,39 @@ export default function CartInvoiceCard({
                 )}
               />
             </div>
+
+            <div className="space-y-3">
+              <Checkbox
+                isSelected={saveDetails}
+                onValueChange={setSaveDetails}
+                classNames={{
+                  label: "text-black",
+                  wrapper:
+                    "before:border-2 before:border-black after:bg-primary-yellow",
+                }}
+              >
+                Save this address for future orders
+              </Checkbox>
+
+              {saveDetails && (
+                <Input
+                  classNames={{
+                    inputWrapper:
+                      "border-2 border-black rounded-md shadow-neo !bg-white hover:!bg-white focus-within:!bg-white data-[hover=true]:!bg-white group-data-[focus=true]:!bg-white",
+                    input: "!text-black placeholder:text-gray-400",
+                    label: "text-gray-600",
+                    innerWrapper: "!bg-white",
+                  }}
+                  fullWidth={true}
+                  label={<span>Address Label</span>}
+                  placeholder="e.g. Home, Office"
+                  labelPlacement="inside"
+                  isRequired={true}
+                  value={saveAddressLabel}
+                  onValueChange={setSaveAddressLabel}
+                />
+              )}
+            </div>
           </>
         )}
 
@@ -5985,6 +6148,12 @@ export default function CartInvoiceCard({
                       {product.selectedWeight && (
                         <p className="text-sm text-gray-600">
                           Weight: {product.selectedWeight}
+                        </p>
+                      )}
+                      {product.selectedVariant && (
+                        <p className="text-sm text-gray-600">
+                          {product.variantLabel || "Option"}:{" "}
+                          {product.selectedVariant}
                         </p>
                       )}
                       {product.selectedBulkOption && (
@@ -6318,17 +6487,24 @@ export default function CartInvoiceCard({
                                 )}`
                               : invoice}
                           </p>
-                          <ClipboardIcon
+                          <button
+                            type="button"
+                            aria-label="Copy invoice"
                             onClick={handleCopyInvoice}
-                            className={`text-dark-text ml-2 h-4 w-4 cursor-pointer ${
+                            className={`ml-2 cursor-pointer text-sm leading-none ${
                               copiedToClipboard ? "hidden" : ""
                             }`}
-                          />
-                          <CheckIcon
-                            className={`text-dark-text ml-2 h-4 w-4 cursor-pointer ${
+                          >
+                            📋
+                          </button>
+                          <span
+                            aria-hidden="true"
+                            className={`ml-2 cursor-pointer text-sm leading-none ${
                               copiedToClipboard ? "" : "hidden"
                             }`}
-                          />
+                          >
+                            ✔️
+                          </span>
                         </div>
                       </>
                     )}
@@ -6412,6 +6588,12 @@ export default function CartInvoiceCard({
                     {product.selectedWeight && (
                       <p className="text-sm text-gray-600">
                         Weight: {product.selectedWeight}
+                      </p>
+                    )}
+                    {product.selectedVariant && (
+                      <p className="text-sm text-gray-600">
+                        {product.variantLabel || "Option"}:{" "}
+                        {product.selectedVariant}
                       </p>
                     )}
                     {product.selectedBulkOption && (
@@ -7108,7 +7290,14 @@ export default function CartInvoiceCard({
                             onFormSubmit(data, "lightning")
                           )();
                         }}
-                        startContent={<BoltIcon className="h-6 w-6" />}
+                        startContent={
+                          <span
+                            aria-hidden="true"
+                            className="text-2xl leading-none"
+                          >
+                            ⚡
+                          </span>
+                        }
                       >
                         Pay with Lightning: {formattedLightningCost}
                         {getDiscountLabel(bitcoinDiscountPct)}
@@ -7129,7 +7318,14 @@ export default function CartInvoiceCard({
                               onFormSubmit(data, "cashu")
                             )();
                           }}
-                          startContent={<BanknotesIcon className="h-6 w-6" />}
+                          startContent={
+                            <span
+                              aria-hidden="true"
+                              className="text-2xl leading-none"
+                            >
+                              🥜
+                            </span>
+                          }
                         >
                           Pay with Cashu: {formattedLightningCost}
                           {getDiscountLabel(bitcoinDiscountPct)}
@@ -7154,7 +7350,14 @@ export default function CartInvoiceCard({
                               onFormSubmit(data, "nwc")
                             )();
                           }}
-                          startContent={<WalletIcon className="h-6 w-6" />}
+                          startContent={
+                            <span
+                              aria-hidden="true"
+                              className="text-2xl leading-none"
+                            >
+                              👛
+                            </span>
+                          }
                         >
                           Pay with {nwcInfo.alias || "NWC"}:{" "}
                           {formattedLightningCost}
@@ -7186,7 +7389,14 @@ export default function CartInvoiceCard({
                           onFormSubmit(data, "stripe")
                         )();
                       }}
-                      startContent={<CurrencyDollarIcon className="h-6 w-6" />}
+                      startContent={
+                        <span
+                          aria-hidden="true"
+                          className="text-2xl leading-none"
+                        >
+                          💳️
+                        </span>
+                      }
                     >
                       Pay with Card: {formattedCardCost}
                       {getDiscountLabel(stripeDiscountPct)}
@@ -7210,7 +7420,12 @@ export default function CartInvoiceCard({
                           )();
                         }}
                         startContent={
-                          <CurrencyDollarIcon className="h-6 w-6" />
+                          <span
+                            aria-hidden="true"
+                            className="text-2xl leading-none"
+                          >
+                            💵
+                          </span>
                         }
                       >
                         Pay with Cash or Payment App:{" "}

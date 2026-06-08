@@ -1,11 +1,6 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
 import { Card, CardBody, Button, Image } from "@heroui/react";
-import {
-  ArrowLongRightIcon,
-  ShoppingBagIcon,
-  UserIcon,
-} from "@heroicons/react/24/outline";
 import { BLUEBUTTONCLASSNAMES } from "@/utils/STATIC-VARIABLES";
 
 const UserTypeSelection = () => {
@@ -19,13 +14,17 @@ const UserTypeSelection = () => {
   const migrateSuffix = migrate
     ? `&migrate=${encodeURIComponent(migrate)}`
     : "";
+  const plan = router.query.plan as string | undefined;
+  const planSuffix = plan ? `&plan=${encodeURIComponent(plan)}` : "";
 
   useEffect(() => {
     if (!router.isReady) return;
     // Sellers coming through the Shopify migration funnel already have an
     // implicit role — skip this step entirely.
     if (migrate === "shopify") {
-      router.replace("/onboarding/market-profile?type=seller&migrate=shopify");
+      router.replace(
+        `/onboarding/choose-plan?type=seller&migrate=shopify${planSuffix}`
+      );
       return;
     }
     if (preselect === "seller") {
@@ -35,7 +34,9 @@ const UserTypeSelection = () => {
 
   const handleNext = () => {
     if (selectedType === "seller") {
-      router.push(`/onboarding/market-profile?type=seller${migrateSuffix}`);
+      router.push(
+        `/onboarding/choose-plan?type=seller${planSuffix}${migrateSuffix}`
+      );
     } else if (selectedType === "buyer") {
       router.push(`/onboarding/market-profile?type=buyer${migrateSuffix}`);
     }
@@ -76,7 +77,9 @@ const UserTypeSelection = () => {
                     : "bg-white hover:bg-gray-50"
                 }`}
               >
-                <UserIcon className="mb-4 h-16 w-16 stroke-[2.5] text-black" />
+                <span aria-hidden="true" className="mb-4 text-4xl leading-none">
+                  👤
+                </span>
                 <h3 className="mb-3 text-xl font-bold text-black">Shopper</h3>
                 <p className="text-center text-sm font-medium text-black">
                   Browse and purchase products from local sellers
@@ -91,7 +94,9 @@ const UserTypeSelection = () => {
                     : "bg-white hover:bg-gray-50"
                 }`}
               >
-                <ShoppingBagIcon className="mb-4 h-16 w-16 stroke-[2.5] text-black" />
+                <span aria-hidden="true" className="mb-4 text-4xl leading-none">
+                  🛍️
+                </span>
                 <h3 className="mb-3 text-xl font-bold text-black">Vendor</h3>
                 <p className="text-center text-sm font-medium text-black">
                   List and sell your products to buyers
@@ -105,7 +110,10 @@ const UserTypeSelection = () => {
                 onClick={handleNext}
                 isDisabled={!selectedType}
               >
-                Next <ArrowLongRightIcon className="ml-1 h-5 w-5" />
+                Next{" "}
+                <span aria-hidden="true" className="ml-1 text-lg leading-none">
+                  ➡️
+                </span>
               </Button>
             </div>
           </CardBody>

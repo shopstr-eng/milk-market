@@ -15,6 +15,8 @@ import {
   ChatsMap,
   ReviewsContextInterface,
   ReviewsContext,
+  ReportsContextInterface,
+  ReportsContext,
   FollowsContextInterface,
   FollowsContext,
   RelaysContextInterface,
@@ -37,6 +39,7 @@ import { ThemeProvider as NextThemesProvider } from "next-themes";
 import {
   fetchAllPosts,
   fetchReviews,
+  fetchReports,
   fetchShopProfile,
   fetchProfile,
   fetchAllFollows,
@@ -48,6 +51,7 @@ import {
   fetchStorefrontData,
   fetchStorefrontChats,
 } from "@/utils/nostr/fetch-service";
+import { fetchAllPostsAbortable } from "@/utils/nostr/fetch-all-posts-abortable";
 import {
   NostrEvent,
   Community,
@@ -70,8 +74,28 @@ import {
 } from "@/components/utility-components/nostr-context-provider";
 import { retryFailedRelayPublishes } from "@/utils/nostr/retry-service";
 import { MintRecoveryBoot } from "@/components/utility-components/mint-recovery-boot";
+import { ProMembershipProvider } from "@/components/utility-components/pro-membership-context";
 import AffiliateRefTracker from "@/components/utility-components/affiliate-ref-tracker";
 import { NostrManager } from "@/utils/nostr/nostr-manager";
+
+const mergeReportEvents = (
+  existing: NostrEvent[],
+  incoming: NostrEvent[]
+): NostrEvent[] => {
+  const reportEventsMap = new Map<string, NostrEvent>();
+  for (const event of existing) {
+    reportEventsMap.set(event.id, event);
+  }
+  for (const event of incoming) {
+    const current = reportEventsMap.get(event.id);
+    if (!current || event.created_at >= current.created_at) {
+      reportEventsMap.set(event.id, event);
+    }
+  }
+  return Array.from(reportEventsMap.values()).sort(
+    (a, b) => b.created_at - a.created_at
+  );
+};
 
 // Run a callback after the browser has had a chance to paint, yielding the
 // main thread first so the visible UI shows before heavy work (e.g. decrypting
@@ -189,6 +213,27 @@ function MilkMarket({ props }: { props: AppProps }) {
             reviewReplies.set(reviewEventId, [...existing, reply]);
           }
           return { ...prev, reviewReplies };
+        });
+      },
+    }
+  );
+
+  const [reportsContext, setReportsContext] = useState<ReportsContextInterface>(
+    {
+      reportEvents: [],
+      isLoading: true,
+      addReportEvent: (reportEvent: NostrEvent) => {
+        setReportsContext((prev) => {
+          if (prev.reportEvents.some((event) => event.id === reportEvent.id)) {
+            return prev;
+          }
+          return {
+            ...prev,
+            reportEvents: [reportEvent, ...prev.reportEvents].sort(
+              (a, b) => b.created_at - a.created_at
+            ),
+            isLoading: false,
+          };
         });
       },
     }
@@ -401,6 +446,19 @@ function MilkMarket({ props }: { props: AppProps }) {
         isLoading,
         reviewEventIds: reviewEventIds ?? prev.reviewEventIds,
         reviewReplies: reviewReplies ?? prev.reviewReplies,
+      };
+    });
+  };
+
+  const editReportsContext = (
+    reportEvents: NostrEvent[],
+    isLoading: boolean
+  ) => {
+    setReportsContext((prev) => {
+      return {
+        ...prev,
+        reportEvents: mergeReportEvents(prev.reportEvents, reportEvents),
+        isLoading,
       };
     });
   };
@@ -747,6 +805,8 @@ function MilkMarket({ props }: { props: AppProps }) {
 
   /** FETCH initial FOLLOWS, RELAYS, PRODUCTS, and PROFILES **/
   useEffect(() => {
+    const abortController = new AbortController();
+
     async function fetchData() {
       const runId = ++initializationRunRef.current;
       const isCurrentRun = () => runId === initializationRunRef.current;
@@ -777,6 +837,7 @@ function MilkMarket({ props }: { props: AppProps }) {
       const {
         guardedEditProductContext,
         guardedEditReviewsContext,
+        guardedEditReportsContext,
         guardedEditShopContext,
         guardedEditProfileContext,
         guardedEditChatContext,
@@ -788,6 +849,7 @@ function MilkMarket({ props }: { props: AppProps }) {
       } = createGuardedEditors({
         guardedEditProductContext: editProductContext,
         guardedEditReviewsContext: editReviewsContext,
+        guardedEditReportsContext: editReportsContext,
         guardedEditShopContext: editShopContext,
         guardedEditProfileContext: editProfileContext,
         guardedEditChatContext: editChatContext,
@@ -1032,7 +1094,13 @@ function MilkMarket({ props }: { props: AppProps }) {
 
         const productsPromise = runTask(
           "fetching products",
-          () => fetchAllPosts(nostr!, allRelays, guardedEditProductContext),
+          () =>
+            fetchAllPostsAbortable(
+              nostr!,
+              allRelays,
+              guardedEditProductContext,
+              abortController.signal
+            ),
           () => guardedEditProductContext(null, false)
         );
 
@@ -1119,6 +1187,18 @@ function MilkMarket({ props }: { props: AppProps }) {
               ),
             () => guardedEditReviewsContext(new Map(), new Map(), false)
           ),
+          runTask(
+            "fetching reports",
+            () =>
+              fetchReports(
+                nostr!,
+                allRelays,
+                productEvents,
+                guardedEditReportsContext,
+                pubkeysToFetchProfilesFor
+              ),
+            () => guardedEditReportsContext([], false)
+          ),
         ]);
 
         if (!isCurrentRun()) return;
@@ -1167,6 +1247,7 @@ function MilkMarket({ props }: { props: AppProps }) {
         if (!isCurrentRun()) return;
         guardedEditProductContext(null, false);
         guardedEditReviewsContext(new Map(), new Map(), false);
+        guardedEditReportsContext([], false);
         guardedEditShopContext(new Map(), false);
         guardedEditProfileContext(new Map(), false);
         guardedEditChatContext(new Map(), false);
@@ -1179,6 +1260,10 @@ function MilkMarket({ props }: { props: AppProps }) {
     }
 
     fetchData();
+
+    return () => {
+      abortController.abort();
+    };
   }, [nostr, signer, isLoggedIn]);
 
   // When navigating between storefront pages, refetch for the new shop
@@ -1322,6 +1407,19 @@ function MilkMarket({ props }: { props: AppProps }) {
           } catch (error) {
             console.error("Error fetching reviews:", error);
             editReviewsContext(new Map(), new Map(), false);
+          }
+
+          try {
+            await fetchReports(
+              nostr!,
+              allRelays,
+              productEvents,
+              editReportsContext,
+              pubkeysToFetchProfilesFor
+            );
+          } catch (error) {
+            console.error("Error fetching reports:", error);
+            editReportsContext([], false);
           }
 
           try {
@@ -1496,66 +1594,77 @@ function MilkMarket({ props }: { props: AppProps }) {
               <FollowsContext.Provider value={followsContext}>
                 <ProductContext.Provider value={productContext}>
                   <ReviewsContext.Provider value={reviewsContext}>
-                    <ProfileMapContext.Provider value={profileContext}>
-                      <ShopMapContext.Provider value={shopContext}>
-                        <ChatsContext.Provider
-                          value={
-                            {
-                              chatsMap: chatsMap,
-                              isLoading: isChatLoading,
-                              addNewlyCreatedMessageEvent:
-                                addNewlyCreatedMessageEvent,
-                              markAllMessagesAsRead: markAllMessagesAsRead,
-                              newOrderIds: newOrderIds,
-                            } as ChatsContextInterface
-                          }
-                        >
-                          {!isCustomDomainVisit &&
-                            router.pathname !== "/" &&
-                            router.pathname !== "/producer-guide" &&
-                            router.pathname !== "/faq" &&
-                            router.pathname !== "/terms" &&
-                            router.pathname !== "/privacy" &&
-                            router.pathname !== "/about" &&
-                            router.pathname !== "/contact" &&
-                            !router.pathname.startsWith("/stall/") &&
-                            !(router.asPath ?? "").startsWith("/stall/") && (
-                              <TopNav
-                                setFocusedPubkey={setFocusedPubkey}
-                                setSelectedSection={setSelectedSection}
-                              />
-                            )}
-                          <div className="flex">
-                            <main className="flex-1">
-                              <CustomDomainProvider
-                                value={domainState.isCustomDomain}
-                                isResolved={domainState.isResolved}
-                              >
-                                {storefrontLoadPubkey ? (
-                                  <StorefrontThemeWrapper
-                                    sellerPubkey={storefrontLoadPubkey}
-                                    // Wrapper internally decides whether to render storefront chrome
-                                    // based on isCustomDomain — but its mount/unmount is stable.
-                                    //
-                                    // Suppress chrome for /stall/* pages: they render
-                                    // <StorefrontLayout> themselves, which already paints
-                                    // its own nav + footer. Wrapping them in another set
-                                    // of chrome doubled the footer (and nav) on custom
-                                    // domains once the SSR pubkey seed started populating
-                                    // `storefrontLoadPubkey` on first render. The
-                                    // `useInsideStorefrontChrome` guard inside the wrapper
-                                    // only catches nested <StorefrontThemeWrapper> calls
-                                    // (e.g. /listing, /cart), not StorefrontLayout.
-                                    renderChrome={
-                                      domainState.isCustomDomain &&
-                                      !router.pathname.startsWith("/stall/")
-                                    }
-                                  >
-                                    {/* Stable key on both branches so if
+                    <ReportsContext.Provider value={reportsContext}>
+                      <ProfileMapContext.Provider value={profileContext}>
+                        <ShopMapContext.Provider value={shopContext}>
+                          <ChatsContext.Provider
+                            value={
+                              {
+                                chatsMap: chatsMap,
+                                isLoading: isChatLoading,
+                                addNewlyCreatedMessageEvent:
+                                  addNewlyCreatedMessageEvent,
+                                markAllMessagesAsRead: markAllMessagesAsRead,
+                                newOrderIds: newOrderIds,
+                              } as ChatsContextInterface
+                            }
+                          >
+                            {!isCustomDomainVisit &&
+                              router.pathname !== "/" &&
+                              router.pathname !== "/producer-guide" &&
+                              router.pathname !== "/faq" &&
+                              router.pathname !== "/terms" &&
+                              router.pathname !== "/privacy" &&
+                              router.pathname !== "/about" &&
+                              router.pathname !== "/contact" &&
+                              !router.pathname.startsWith("/stall/") &&
+                              !(router.asPath ?? "").startsWith("/stall/") && (
+                                <TopNav
+                                  setFocusedPubkey={setFocusedPubkey}
+                                  setSelectedSection={setSelectedSection}
+                                />
+                              )}
+                            <div className="flex w-full min-w-0">
+                              <main className="min-w-0 flex-1">
+                                <CustomDomainProvider
+                                  value={domainState.isCustomDomain}
+                                  isResolved={domainState.isResolved}
+                                >
+                                  {storefrontLoadPubkey ? (
+                                    <StorefrontThemeWrapper
+                                      sellerPubkey={storefrontLoadPubkey}
+                                      // Wrapper internally decides whether to render storefront chrome
+                                      // based on isCustomDomain — but its mount/unmount is stable.
+                                      //
+                                      // Suppress chrome for /stall/* pages: they render
+                                      // <StorefrontLayout> themselves, which already paints
+                                      // its own nav + footer. Wrapping them in another set
+                                      // of chrome doubled the footer (and nav) on custom
+                                      // domains once the SSR pubkey seed started populating
+                                      // `storefrontLoadPubkey` on first render. The
+                                      // `useInsideStorefrontChrome` guard inside the wrapper
+                                      // only catches nested <StorefrontThemeWrapper> calls
+                                      // (e.g. /listing, /cart), not StorefrontLayout.
+                                      renderChrome={
+                                        domainState.isCustomDomain &&
+                                        !router.pathname.startsWith("/stall/")
+                                      }
+                                    >
+                                      {/* Stable key on both branches so if
                                                   the wrapper ever flips in/out
                                                   (e.g. _error.tsx paths) React
                                                   treats the page as the same
                                                   element instead of remounting. */}
+                                      <Component
+                                        key="page"
+                                        {...pageProps}
+                                        focusedPubkey={focusedPubkey}
+                                        setFocusedPubkey={setFocusedPubkey}
+                                        selectedSection={selectedSection}
+                                        setSelectedSection={setSelectedSection}
+                                      />
+                                    </StorefrontThemeWrapper>
+                                  ) : (
                                     <Component
                                       key="page"
                                       {...pageProps}
@@ -1564,23 +1673,14 @@ function MilkMarket({ props }: { props: AppProps }) {
                                       selectedSection={selectedSection}
                                       setSelectedSection={setSelectedSection}
                                     />
-                                  </StorefrontThemeWrapper>
-                                ) : (
-                                  <Component
-                                    key="page"
-                                    {...pageProps}
-                                    focusedPubkey={focusedPubkey}
-                                    setFocusedPubkey={setFocusedPubkey}
-                                    selectedSection={selectedSection}
-                                    setSelectedSection={setSelectedSection}
-                                  />
-                                )}
-                              </CustomDomainProvider>
-                            </main>
-                          </div>
-                        </ChatsContext.Provider>
-                      </ShopMapContext.Provider>
-                    </ProfileMapContext.Provider>
+                                  )}
+                                </CustomDomainProvider>
+                              </main>
+                            </div>
+                          </ChatsContext.Provider>
+                        </ShopMapContext.Provider>
+                      </ProfileMapContext.Provider>
+                    </ReportsContext.Provider>
                   </ReviewsContext.Provider>
                 </ProductContext.Provider>
               </FollowsContext.Provider>
@@ -1599,8 +1699,10 @@ function App(props: AppProps) {
         <NextThemesProvider attribute="class">
           <NostrContextProvider>
             <SignerContextProvider>
-              <MintRecoveryBoot />
-              <MilkMarket props={props} />
+              <ProMembershipProvider>
+                <MintRecoveryBoot />
+                <MilkMarket props={props} />
+              </ProMembershipProvider>
             </SignerContextProvider>
           </NostrContextProvider>
         </NextThemesProvider>
