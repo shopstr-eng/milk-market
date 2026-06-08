@@ -181,7 +181,7 @@ export default function StandaloneLanding() {
           text: data.error || "Something went wrong! Please try again.",
         });
       }
-    } catch (error) {
+    } catch {
       setSubmitMessage({
         type: "error",
         text: "Network error! Please check your connection and try again.",

@@ -977,7 +977,7 @@ const ShopProfileForm = ({ isOnboarding = false }: ShopProfileFormProps) => {
             signedEvent,
           }),
         });
-      } catch (e) {}
+      } catch {}
     }
 
     setIsUploadingShopProfile(false);

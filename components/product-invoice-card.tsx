@@ -1939,7 +1939,7 @@ export default function ProductInvoiceCard({
         productId: productData.id,
         quantity: productData.selectedQuantity || 1,
       });
-    } catch (error) {
+    } catch {
       setFiatOrderFailed(true);
     }
   };

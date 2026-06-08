@@ -176,7 +176,7 @@ const CommunityManagementPage = () => {
       } else {
         setPasswordError("Incorrect password. Please try again.");
       }
-    } catch (error) {
+    } catch {
       setPasswordError("An error occurred. Please try again.");
     }
   };
