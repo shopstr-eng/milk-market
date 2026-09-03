@@ -15,6 +15,7 @@
     "test": "node -e \"process.exit(0)\""
   },
   "dependencies": {
+    "@babel/runtime": "7.29.2",
     "@milk-market/api-client": "file:../../packages/api-client",
     "@milk-market/domain": "file:../../packages/domain",
     "@milk-market/nostr": "file:../../packages/nostr",

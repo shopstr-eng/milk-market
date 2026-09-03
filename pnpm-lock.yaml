@@ -249,6 +249,9 @@ importers:
 
   apps/mobile:
     dependencies:
+      "@babel/runtime":
+        specifier: 7.29.2
+        version: 7.29.2
       "@milk-market/api-client":
         specifier: file:../../packages/api-client
         version: link:../../packages/api-client

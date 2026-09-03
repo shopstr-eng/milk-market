@@ -4,6 +4,7 @@ import type {
 } from "@milk-market/domain";
 
 export * from "./orders";
+export * from "./shipping";
 
 export const API_CLIENT_PACKAGE_READY = true as const;
 
