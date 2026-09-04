@@ -9,14 +9,10 @@ import {
 import { verifyEvent } from "nostr-tools";
 
 const mockPublish = jest.fn();
-const mockClose = jest.fn();
 
-jest.mock("nostr-tools/pool", () => ({
-  useWebSocketImplementation: jest.fn(),
-  SimplePool: jest.fn(() => ({ publish: mockPublish, close: mockClose })),
+jest.mock("@/utils/nostr/contained-relay", () => ({
+  publishEventToRelay: (...args: unknown[]) => mockPublish(...args),
 }));
-
-jest.mock("ws", () => ({ __esModule: true, default: class {} }));
 
 jest.mock("nostr-tools", () => ({
   finalizeEvent: jest.fn(),
@@ -86,18 +82,13 @@ const queryMock = jest.fn();
 
 beforeEach(() => {
   jest.clearAllMocks();
-  // publishToRelays arms a 21s fallback timeout that loses the race to the
-  // resolved publish promise; fake timers keep it from leaking as an open handle.
-  jest.useFakeTimers();
   mocked.verifyEvent.mockReturnValue(true);
   mocked.fetchRelayConfigFromDb.mockResolvedValue(relayListEvents());
   mocked.cacheEvent.mockResolvedValue(undefined);
   queryMock.mockResolvedValue({ rows: [] });
   mocked.getDbPool.mockReturnValue({ query: queryMock });
   // Default: every relay accepts the event.
-  mockPublish.mockImplementation((relays: string[]) =>
-    relays.map(() => Promise.resolve("ok"))
-  );
+  mockPublish.mockResolvedValue(true);
 });
 
 describe("republishBlogPostToAuthorRelays", () => {
@@ -126,7 +117,7 @@ describe("republishBlogPostToAuthorRelays", () => {
     // Cached before broadcast so the post is readable even if relays time out.
     expect(mocked.cacheEvent).toHaveBeenCalledWith(event);
 
-    const relaysPublishedTo = mockPublish.mock.calls[0]![0] as string[];
+    const relaysPublishedTo = mockPublish.mock.calls.map(([url]) => url);
     // Author's own write relays (unmarked + write-only) are included.
     expect(relaysPublishedTo).toContain("wss://author.example");
     expect(relaysPublishedTo).toContain("wss://write.example");
@@ -149,7 +140,7 @@ describe("republishBlogPostToAuthorRelays", () => {
   test("still publishes to defaults + BLASTR when the relay list can't be resolved", async () => {
     mocked.fetchRelayConfigFromDb.mockRejectedValue(new Error("db down"));
     const result = await republishBlogPostToAuthorRelays(blogEvent());
-    const relaysPublishedTo = mockPublish.mock.calls[0]![0] as string[];
+    const relaysPublishedTo = mockPublish.mock.calls.map(([url]) => url);
     for (const def of DEFAULT_RELAYS) {
       expect(relaysPublishedTo).toContain(def);
     }
@@ -158,9 +149,7 @@ describe("republishBlogPostToAuthorRelays", () => {
   });
 
   test("tracks a failed relay publish when every relay rejects", async () => {
-    mockPublish.mockImplementation((relays: string[]) =>
-      relays.map(() => Promise.reject(new Error("relay down")))
-    );
+    mockPublish.mockResolvedValue(false);
     const event = blogEvent();
     const result = await republishBlogPostToAuthorRelays(event);
 

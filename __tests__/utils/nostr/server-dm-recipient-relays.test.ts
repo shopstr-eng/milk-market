@@ -16,14 +16,20 @@ import {
 } from "@/utils/db/db-service";
 
 const mockPublish = jest.fn();
-const mockClose = jest.fn();
 
-jest.mock("nostr-tools/pool", () => ({
-  useWebSocketImplementation: jest.fn(),
-  SimplePool: jest.fn(() => ({ publish: mockPublish, close: mockClose })),
+jest.mock("@/utils/nostr/contained-relay", () => ({
+  publishEventToRelay: (...args: unknown[]) => mockPublish(...args),
 }));
 
-jest.mock("ws", () => ({ __esModule: true, default: class {} }));
+jest.mock("@/utils/nostr/nip65-indexer-fetch", () => ({
+  fetchKind10002FromIndexers: jest.fn(async () => null),
+}));
+
+// DNS safety has dedicated coverage; these routing fixtures use reserved
+// .example hostnames and must not depend on a real resolver.
+jest.mock("@/utils/url-safety", () => ({
+  isSafePublicHostname: jest.fn(async () => true),
+}));
 
 jest.mock("nostr-tools", () => ({
   finalizeEvent: jest.fn((event: any) => ({
@@ -72,9 +78,6 @@ const queryMock = jest.fn();
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.ENCRYPTION_NSEC = "nsec1test";
-  // publishToRelays arms a 21s fallback timeout that loses the race to the
-  // resolved publish promise; fake timers keep it from leaking as an open handle.
-  jest.useFakeTimers();
   mocked.fetchRelayConfigFromDb.mockResolvedValue([
     {
       kind: 10002,
@@ -88,13 +91,10 @@ beforeEach(() => {
   mocked.cacheEvent.mockResolvedValue(undefined);
   queryMock.mockResolvedValue({ rows: [] });
   mocked.getDbPool.mockReturnValue({ query: queryMock });
-  mockPublish.mockImplementation((relays: string[]) =>
-    relays.map(() => Promise.resolve("ok"))
-  );
+  mockPublish.mockResolvedValue(true);
 });
 
 afterEach(() => {
-  jest.useRealTimers();
   delete process.env.ENCRYPTION_NSEC;
 });
 
@@ -108,7 +108,7 @@ describe("sendServerSideNostrDMToRecipientRelays", () => {
 
     expect(result).toBe(true);
     expect(mocked.cacheEvent).toHaveBeenCalledTimes(1);
-    const relaysPublishedTo = mockPublish.mock.calls[0]![0] as string[];
+    const relaysPublishedTo = mockPublish.mock.calls.map(([url]) => url);
     // Read relays: unmarked (read+write) and read-only are both read targets.
     expect(relaysPublishedTo).toContain("wss://payee.example");
     expect(relaysPublishedTo).toContain("wss://payee-read.example");
@@ -131,7 +131,7 @@ describe("sendServerSideNostrDMToRecipientRelays", () => {
     );
 
     expect(result).toBe(true);
-    const relaysPublishedTo = mockPublish.mock.calls[0]![0] as string[];
+    const relaysPublishedTo = mockPublish.mock.calls.map(([url]) => url);
     for (const def of DEFAULT_RELAYS) {
       expect(relaysPublishedTo).toContain(def);
     }
@@ -160,6 +160,6 @@ describe("sendServerSideNostrDM (unchanged default-relay behavior)", () => {
 
     expect(result).toBe(true);
     expect(mocked.fetchRelayConfigFromDb).not.toHaveBeenCalled();
-    expect(mockPublish.mock.calls[0]![0]).toEqual(DEFAULT_RELAYS);
+    expect(mockPublish.mock.calls.map(([url]) => url)).toEqual(DEFAULT_RELAYS);
   });
 });
