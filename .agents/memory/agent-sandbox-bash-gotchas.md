@@ -32,18 +32,19 @@ kernel OOM-killer reaped it — that is the documented cold-build OOM (see
 upstream-parity-and-dev-oom.md), not a code regression. Verify via tsc+lint+jest
 instead and note the boot limitation.
 
-## `tsc --noEmit` is unreliable + very slow here — prefer LSP diagnostics
+## `tsc --noEmit`: background ShellExec task works; detached `setsid` does not
 
-Full-project `tsc --noEmit` on this large Next 16 repo is pathologically slow on a
-throttled box (12+ min, sometimes never completing), AND the detached process is
-reaped across bash tool-call boundaries even with `setsid … </dev/null >/dev/null 2>&1 &`
-(log stays 0 bytes with no EXIT marker — not an OOM, the process is simply gone,
-so you poll forever).
-**How to apply:** for a post-edit type check, don't fight full tsc. Use the
-diagnostics skill's `getLatestLspDiagnostics({filePath})` per touched file — the
-`tsserver` LSP is already running, so it returns type errors for those exact files
-in seconds. Reserve full tsc for when you truly need whole-graph checking and can
-babysit it in the foreground.
+Full-project `tsc --noEmit` on this large Next 16 repo completes in ~2-4 min when
+started as a **background ShellExec task** (`run_in_background: true` with output
+redirected to a file + a Monitor on an `EXIT:` marker). What fails is a manually
+`setsid`-detached process: it is reaped across bash tool-call boundaries (log stays
+0 bytes with no EXIT marker — not an OOM, the process is simply gone, so you poll
+forever).
+**How to apply:** for a full-graph type check, use a background ShellExec task
+(`NODE_OPTIONS='--max-old-space-size=3072' npx tsc --noEmit --incremental false`),
+NOT setsid. For a quick post-edit check of a few touched files, the diagnostics
+skill's `getLatestLspDiagnostics({filePath})` is faster — the `tsserver` LSP is
+already running. Don't run Jest concurrently with tsc (memory contention).
 
 **Caveat — empty LSP diagnostics can be a false clean.** `getLatestLspDiagnostics`
 returned `{diagnostics:{}}` for files that genuinely had missing imports and
@@ -55,3 +56,14 @@ it imports, and node-parse function param destructures for props you pass (e.g.
 what LSP missed.
 
 `pgrep -f "tsserver.js"` also matches your OWN wrapper shell's command line (bash -c "...tsserver.js..."), so `kill $(pgrep -f tsserver.js)` kills your own shell mid-command (exit -1). Anchor the pattern to the process start instead: `pgrep -f "^/nix/store.*tsserver.js" | xargs -r kill`, or kill listed PIDs excluding $$.
+
+## Long-lived local services (e.g. a Nutshell mint) must be managed workflows
+
+Background shell tasks auto-stop after ~5 minutes and detached `setsid`
+processes get reaped across tool-call boundaries (see the tsc note above), so a
+local service started either way silently dies mid-test. For the staging escrow
+runs the local Nutshell mint only survived as a configured workflow
+("Staging Cashu Mint", port 3338, FakeWallet, MINT_RATE_LIMIT=FALSE).
+**How to apply:** anything that must stay up longer than one bash call — mints,
+relays, mock servers — goes through the workflows tooling, not a background
+shell.

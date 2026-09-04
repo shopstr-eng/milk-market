@@ -15,6 +15,10 @@ import {
   paymentFailedSellerEmail,
   transferFailureAlertEmail,
   proLifetimeLingeringCancelAlertEmail,
+  orphanedSubscriptionPaymentAlertEmail,
+  orphanedSubscriptionCancellationAlertEmail,
+  orphanedSubscriptionReminderAlertEmail,
+  orphanedStripeEventAlertEmail,
   customDomainAdminNotificationEmail,
   affiliatePaidEmail,
   affiliatePausedToAffiliateEmail,
@@ -525,20 +529,61 @@ export async function sendProReceipt(
   return sendEmail(sellerEmail, subject, html);
 }
 
-export async function sendTransferFailureAlert(
-  adminEmail: string,
-  params: {
-    subscriptionId: string;
-    invoiceId: string;
-    failures: Array<{
-      sellerPubkey: string;
-      amountCents: number;
-      error: string;
-    }>;
-  }
-): Promise<boolean> {
+export async function sendTransferFailureAlert(params: {
+  subscriptionId: string;
+  invoiceId: string;
+  failures: Array<{
+    sellerPubkey: string;
+    amountCents: number;
+    error: string;
+  }>;
+  adminEmail?: string;
+}): Promise<boolean> {
   const { subject, html } = transferFailureAlertEmail(params);
-  return sendEmail(adminEmail, subject, html);
+  // Ops alert: route to the shared ops recipient (explicit admin email, then
+  // the verified platform sender) — never to a subscription seller. A seller
+  // can't act on platform-side transfer remediation, and in a multi-seller
+  // renewal the failure details cover OTHER sellers too.
+  const recipient = await resolveOpsAlertRecipient(
+    params.adminEmail,
+    "transfer_failure"
+  );
+  if (!recipient) return false;
+  return sendEmail(recipient, subject, html);
+}
+
+/**
+ * Shared recipient resolution for ops alerts: explicit adminEmail (trimmed)
+ * wins, then the SendGrid verified from_email (the operator's own mailbox).
+ * Returns null — after logging loudly under the alert's marker — when neither
+ * is available or resolution fails, so every ops alert fails the same visible
+ * way instead of silently returning false. Keep ALL ops-alert senders on this
+ * helper: a fix applied to only one copy leaves the others stale.
+ */
+async function resolveOpsAlertRecipient(
+  adminEmail: string | undefined,
+  logMarker: string
+): Promise<string | null> {
+  let recipient = (adminEmail || "").trim();
+  try {
+    if (!recipient) {
+      const { fromEmail } = await getUncachableSendGridClient();
+      recipient = (fromEmail || "").trim();
+    }
+  } catch (err) {
+    console.error(
+      `[${logMarker}] Failed to resolve admin email recipient:`,
+      err
+    );
+    return null;
+  }
+  if (!recipient) {
+    console.error(
+      `[${logMarker}] No admin email recipient available (set DOMAINS_ADMIN_EMAIL or configure SendGrid from_email)`
+    );
+    return null;
+  }
+  return recipient;
 }
 
 /**
@@ -557,24 +602,110 @@ export async function sendProLifetimeLingeringCancelAlert(params: {
   adminEmail?: string;
 }): Promise<boolean> {
   const { subject, html } = proLifetimeLingeringCancelAlertEmail(params);
-  let recipient = (params.adminEmail || "").trim();
-  try {
-    if (!recipient) {
-      const { fromEmail } = await getUncachableSendGridClient();
-      recipient = (fromEmail || "").trim();
-    }
-  } catch (err) {
-    console.error(
-      "[pro_lifetime_lingering_subscription_cancel] Failed to resolve admin email recipient:",
-      err
-    );
-    return false;
-  }
-  if (!recipient) {
-    console.error(
-      "[pro_lifetime_lingering_subscription_cancel] No admin email recipient available (configure SendGrid from_email)"
-    );
-    return false;
-  }
+  const recipient = await resolveOpsAlertRecipient(
+    params.adminEmail,
+    "pro_lifetime_lingering_subscription_cancel"
+  );
+  if (!recipient) return false;
+  return sendEmail(recipient, subject, html);
+}
+
+/**
+ * Alert the operator that a paid renewal invoice matched no local
+ * subscriptions row (ORPHANED_SUBSCRIPTION_PAYMENT). Resolves the recipient
+ * the same way the other ops alerts do — explicit adminEmail > SendGrid
+ * verified from_email (the operator's own mailbox). Returns whether the email
+ * was actually sent; callers must treat a false/throw as non-fatal because
+ * the webhook response must stay 200 (the row will never appear on retry).
+ */
+export async function sendOrphanedSubscriptionPaymentAlert(params: {
+  stripeSubscriptionId: string;
+  invoiceId: string;
+  eventId: string;
+  amountPaid: string;
+  currency: string;
+  customerEmail: string;
+  billingReason: string;
+  adminEmail?: string;
+}): Promise<boolean> {
+  const { subject, html } = orphanedSubscriptionPaymentAlertEmail(params);
+  const recipient = await resolveOpsAlertRecipient(
+    params.adminEmail,
+    "orphaned_subscription_payment"
+  );
+  if (!recipient) return false;
+  return sendEmail(recipient, subject, html);
+}
+
+/**
+ * Alert the operator that a customer.subscription.deleted event matched no
+ * local subscriptions row (ORPHANED_SUBSCRIPTION_CANCEL). Resolves the
+ * recipient the same way the other ops alerts do — explicit adminEmail >
+ * SendGrid verified from_email. Returns whether the email was actually sent;
+ * callers must treat a false/throw as non-fatal because the webhook response
+ * must stay 200 (the row will never appear on retry).
+ */
+export async function sendOrphanedSubscriptionCancellationAlert(params: {
+  stripeSubscriptionId: string;
+  eventId: string;
+  customer: string;
+  status: string;
+  adminEmail?: string;
+}): Promise<boolean> {
+  const { subject, html } = orphanedSubscriptionCancellationAlertEmail(params);
+  const recipient = await resolveOpsAlertRecipient(
+    params.adminEmail,
+    "orphaned_subscription_cancel"
+  );
+  if (!recipient) return false;
+  return sendEmail(recipient, subject, html);
+}
+
+/**
+ * Alert the operator that an invoice.upcoming renewal reminder matched no
+ * local subscriptions row (ORPHANED_SUBSCRIPTION_REMINDER) — a buyer is about
+ * to be charged without ever being warned. Same recipient resolution as the
+ * other ops alerts; returns whether the email was actually sent, and callers
+ * must treat a false/throw as non-fatal because the webhook response must
+ * stay 200 (the row will never appear on retry).
+ */
+export async function sendOrphanedSubscriptionReminderAlert(params: {
+  stripeSubscriptionId: string;
+  invoiceId: string;
+  eventId: string;
+  customerEmail: string;
+  adminEmail?: string;
+}): Promise<boolean> {
+  const { subject, html } = orphanedSubscriptionReminderAlertEmail(params);
+  const recipient = await resolveOpsAlertRecipient(
+    params.adminEmail,
+    "orphaned_subscription_reminder"
+  );
+  if (!recipient) return false;
+  return sendEmail(recipient, subject, html);
+}
+
+/**
+ * Generic ops alert for an ORPHANED_* Stripe event: money moved at Stripe but
+ * no local record matched. One sender for every orphan marker so each alert
+ * shares the same recipient resolution and template shape instead of growing
+ * a parallel email path per marker. Returns whether the email was actually
+ * sent; callers must treat a false/throw as non-fatal because the webhook
+ * response must stay 200 (the row will never appear on retry).
+ */
+export async function sendOrphanedStripeEventAlert(params: {
+  title: string;
+  marker: string;
+  logTag: string;
+  summary: string;
+  details: Array<{ label: string; value: string }>;
+  adminEmail?: string;
+}): Promise<boolean> {
+  const { subject, html } = orphanedStripeEventAlertEmail(params);
+  const recipient = await resolveOpsAlertRecipient(
+    params.adminEmail,
+    params.logTag
+  );
+  if (!recipient) return false;
   return sendEmail(recipient, subject, html);
 }

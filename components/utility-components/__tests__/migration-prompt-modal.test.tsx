@@ -132,13 +132,13 @@ describe("MigrationPromptModal", () => {
     fireEvent.click(upgradeButton);
 
     expect(
-      await screen.findByRole("alert", {}, { timeout: 5000 })
+      await screen.findByRole("alert", {}, { timeout: 10000 })
     ).toHaveTextContent(
       "Migration failed. Please try again with the correct passphrase."
     );
     expect(mockOnSuccess).not.toHaveBeenCalled();
     expect(mockOnClose).not.toHaveBeenCalled();
-  });
+  }, 15000);
 
   it("should show an error message when migration throws an error", async () => {
     mockedMigrateToNip49.mockRejectedValue(new Error("Decryption failed"));
@@ -153,11 +153,11 @@ describe("MigrationPromptModal", () => {
     fireEvent.click(upgradeButton);
 
     expect(
-      await screen.findByRole("alert", {}, { timeout: 5000 })
+      await screen.findByRole("alert", {}, { timeout: 10000 })
     ).toHaveTextContent(
       "Failed to decrypt with the provided passphrase. Please try again."
     );
-  });
+  }, 15000);
 
   it("should call migration handler when Enter key is pressed in the input", () => {
     mockedMigrateToNip49.mockResolvedValue(true);

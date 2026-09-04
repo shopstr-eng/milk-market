@@ -815,6 +815,166 @@ describe("db-service helpers", () => {
         }
       });
     });
+
+    // Money-path accessors must REJECT on a DB outage so webhook/payment
+    // callers fail closed (500 + retry) instead of misreading an outage as
+    // "no row" (null/[]/{valid:false}). The empty value is only for
+    // genuinely missing rows. Pins the behavior flipped in task #268.
+    describe("money-path read accessors propagate DB outages", () => {
+      const readFailure = new Error("database offline");
+      const pk = "a".repeat(64);
+
+      async function withMockedPool(
+        queryImpl: () => Promise<{ rows: unknown[]; rowCount: number }>,
+        run: (mod: any, client: { release: jest.Mock }) => Promise<void>
+      ) {
+        await jest.isolateModulesAsync(async () => {
+          const previousDatabaseUrl = process.env.DATABASE_URL;
+          process.env.DATABASE_URL = "postgres://test@localhost/testdb";
+          const client = {
+            query: jest.fn(queryImpl),
+            release: jest.fn(),
+          };
+          const pool = {
+            connect: jest.fn(async () => client),
+            on: jest.fn(),
+            end: jest.fn(),
+          };
+          const consoleError = jest
+            .spyOn(console, "error")
+            .mockImplementation(() => undefined);
+          try {
+            jest.doMock("pg", () => ({
+              Pool: class {
+                constructor() {
+                  return pool;
+                }
+              },
+            }));
+            const mod = await import("../db-service");
+            await run(mod, client);
+            await mod.closeDbPool();
+          } finally {
+            consoleError.mockRestore();
+            process.env.DATABASE_URL = previousDatabaseUrl;
+          }
+        });
+      }
+
+      const outageCases: Array<
+        [string, (mod: any) => Promise<unknown>]
+      > = [
+        ["getStripeConnectAccount", (mod) => mod.getStripeConnectAccount(pk)],
+        [
+          "getSellerNotificationEmail",
+          (mod) => mod.getSellerNotificationEmail(pk),
+        ],
+        [
+          "getBuyerNotificationEmail",
+          (mod) => mod.getBuyerNotificationEmail("order-1"),
+        ],
+        ["getUserAuthEmail", (mod) => mod.getUserAuthEmail(pk)],
+        ["validateDiscountCode", (mod) => mod.validateDiscountCode("CODE", pk)],
+        [
+          "getDiscountCodesByPubkey",
+          (mod) => mod.getDiscountCodesByPubkey(pk),
+        ],
+        // Subscription reads feed cancel/update routes that must 500 on an
+        // outage (never misread it as "not found"). Pins task #267.
+        ["getSubscriptionById", (mod) => mod.getSubscriptionById(1)],
+        [
+          "getSubscriptionsByBuyerPubkey",
+          (mod) => mod.getSubscriptionsByBuyerPubkey(pk),
+        ],
+        [
+          "getSubscriptionsByBuyerEmail",
+          (mod) => mod.getSubscriptionsByBuyerEmail("buyer@example.com"),
+        ],
+        [
+          "getSubscriptionsBySellerPubkey",
+          (mod) => mod.getSubscriptionsBySellerPubkey(pk),
+        ],
+        [
+          "getSubscriptionNotifications",
+          (mod) => mod.getSubscriptionNotifications(1),
+        ],
+      ];
+
+      test.each(outageCases)(
+        "%s rejects (never swallows) when the DB query fails",
+        async (_name, call) => {
+          await withMockedPool(
+            async () => {
+              throw readFailure;
+            },
+            async (mod, client) => {
+              await expect(call(mod)).rejects.toBe(readFailure);
+              expect(client.release).toHaveBeenCalled();
+            }
+          );
+        }
+      );
+
+      const emptyResultCases: Array<
+        [string, (mod: any) => Promise<unknown>, unknown]
+      > = [
+        ["getStripeConnectAccount", (mod) => mod.getStripeConnectAccount(pk), null],
+        [
+          "getSellerNotificationEmail",
+          (mod) => mod.getSellerNotificationEmail(pk),
+          null,
+        ],
+        [
+          "getBuyerNotificationEmail",
+          (mod) => mod.getBuyerNotificationEmail("order-1"),
+          null,
+        ],
+        ["getUserAuthEmail", (mod) => mod.getUserAuthEmail(pk), null],
+        [
+          "validateDiscountCode",
+          (mod) => mod.validateDiscountCode("CODE", pk),
+          { valid: false },
+        ],
+        [
+          "getDiscountCodesByPubkey",
+          (mod) => mod.getDiscountCodesByPubkey(pk),
+          [],
+        ],
+        ["getSubscriptionById", (mod) => mod.getSubscriptionById(1), null],
+        [
+          "getSubscriptionsByBuyerPubkey",
+          (mod) => mod.getSubscriptionsByBuyerPubkey(pk),
+          [],
+        ],
+        [
+          "getSubscriptionsByBuyerEmail",
+          (mod) => mod.getSubscriptionsByBuyerEmail("buyer@example.com"),
+          [],
+        ],
+        [
+          "getSubscriptionsBySellerPubkey",
+          (mod) => mod.getSubscriptionsBySellerPubkey(pk),
+          [],
+        ],
+        [
+          "getSubscriptionNotifications",
+          (mod) => mod.getSubscriptionNotifications(1),
+          [],
+        ],
+      ];
+
+      test.each(emptyResultCases)(
+        "%s still returns the empty value for genuinely missing rows",
+        async (_name, call, expected) => {
+          await withMockedPool(
+            async () => ({ rows: [], rowCount: 0 }),
+            async (mod) => {
+              await expect(call(mod)).resolves.toEqual(expected);
+            }
+          );
+        }
+      );
+    });
   });
 
   describe("db-service with Testcontainers (discounts, stats, cached events)", () => {
@@ -1234,6 +1394,7 @@ describe("db-service helpers", () => {
           const ephemeralPubkey = "e".repeat(64);
           const sourceMessageId = "1".repeat(64);
           const secondSourceMessageId = "2".repeat(64);
+          const thirdSourceMessageId = "3".repeat(64);
           const pool = db.getDbPool();
           const client = await pool.connect();
           try {
@@ -1242,13 +1403,15 @@ describe("db-service helpers", () => {
                  (id, pubkey, created_at, kind, tags, content, sig)
                VALUES
                  ($1, $2, 1, 1059, $3::jsonb, 'encrypted', $4),
-                 ($5, $2, 2, 1059, $3::jsonb, 'encrypted', $4)`,
+                 ($5, $2, 2, 1059, $3::jsonb, 'encrypted', $4),
+                 ($6, $2, 3, 1059, $3::jsonb, 'encrypted', $4)`,
               [
                 sourceMessageId,
                 ephemeralPubkey,
                 JSON.stringify([["p", sellerPubkey]]),
                 "f".repeat(128),
                 secondSourceMessageId,
+                thirdSourceMessageId,
               ]
             );
           } finally {
@@ -1256,7 +1419,7 @@ describe("db-service helpers", () => {
           }
 
           const cachedMessages = await db.fetchAllMessagesFromDb(sellerPubkey);
-          expect(cachedMessages).toHaveLength(2);
+          expect(cachedMessages).toHaveLength(3);
           expect(
             cachedMessages.every(
               (message) => typeof message.created_at === "number"
@@ -1405,6 +1568,44 @@ describe("db-service helpers", () => {
           await expect(
             db.getOrderStatuses(["order-secure"], ephemeralPubkey)
           ).resolves.toEqual({});
+
+          // A self-declared buyer must NOT be able to init a "canceled"
+          // state from a publicly observable wrap id — that would squat the
+          // UNIQUE (seller_pubkey, source_message_id) slot and block the
+          // real order forever. Uses a fresh wrap so the negative case can't
+          // be masked by an existing binding, and the seller must still be
+          // able to claim the wrap afterwards.
+          await expect(
+            db.transitionSellerOrderStatus({
+              actorPubkey: buyerPubkey,
+              sellerPubkey,
+              buyerPubkey,
+              orderId: "order-early-cancel",
+              expectedStatus: "pending",
+              status: "canceled",
+              messageId: thirdSourceMessageId,
+              transitionId: "squat-attempt",
+            })
+          ).resolves.toEqual({ outcome: "forbidden" });
+          await expect(
+            db.getOrderStatuses(["order-early-cancel"], sellerPubkey)
+          ).resolves.toEqual({});
+          await expect(
+            db.transitionSellerOrderStatus({
+              actorPubkey: sellerPubkey,
+              sellerPubkey,
+              buyerPubkey,
+              orderId: "order-early-cancel",
+              expectedStatus: "pending",
+              status: "confirmed",
+              messageId: thirdSourceMessageId,
+              transitionId: "seller-init-after-squat-attempt",
+            })
+          ).resolves.toEqual({
+            outcome: "updated",
+            status: "confirmed",
+            version: 1,
+          });
 
           await expect(
             db.transitionSellerOrderStatus({

@@ -312,7 +312,22 @@ describe("UserProfileForm", () => {
   test("derives payment preference from the lightning address on save", async () => {
     mockCreateNostrProfileEvent.mockResolvedValue({});
     const user = userEvent.setup();
-    renderWithProviders(<UserProfileForm />);
+    // Seed the stale legacy donation key in the existing profile so the save
+    // must prove the merge-and-delete path strips it.
+    const staleProfile = new Map([
+      [
+        mockUserPubkey,
+        {
+          pubkey: mockUserPubkey,
+          content: {
+            display_name: "Test User",
+            shopstr_donation: 3.3,
+          },
+          created_at: 0,
+        },
+      ],
+    ]);
+    renderWithProviders(<UserProfileForm />, staleProfile);
     await screen.findByLabelText("Display name");
 
     // Read-only display: Cashu without a lightning address.
@@ -324,10 +339,6 @@ describe("UserProfileForm", () => {
     );
     expect(screen.getByText("Lightning (Bitcoin)")).toBeInTheDocument();
 
-    const donationInput = screen.getByLabelText(/Shopstr donation/i);
-    await user.clear(donationInput);
-    await user.type(donationInput, "5.5");
-
     await user.click(screen.getByRole("button", { name: /Save Profile/i }));
 
     await waitFor(() => {
@@ -336,11 +347,10 @@ describe("UserProfileForm", () => {
         expect.any(Object),
         expect.stringContaining('"payment_preference":"lightning"')
       );
-      expect(mockCreateNostrProfileEvent).toHaveBeenCalledWith(
-        expect.any(Object),
-        expect.any(Object),
-        expect.stringContaining('"shopstr_donation":"5.5"')
-      );
     });
+    // The legacy shopstr_donation key must never be written; mm_donation
+    // (shop settings) is canonical.
+    const savedPayload = mockCreateNostrProfileEvent.mock.calls.at(-1)?.[2];
+    expect(savedPayload).not.toContain("shopstr_donation");
   });
 });

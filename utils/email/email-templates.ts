@@ -1167,6 +1167,159 @@ export function proLifetimeLingeringCancelAlertEmail(params: {
   };
 }
 
+export function orphanedSubscriptionPaymentAlertEmail(params: {
+  stripeSubscriptionId: string;
+  invoiceId: string;
+  eventId: string;
+  amountPaid: string;
+  currency: string;
+  customerEmail: string;
+  billingReason: string;
+}): { subject: string; html: string } {
+  const body = `
+    <h2 style="margin:0 0 16px;color:#111827;font-size:20px;font-weight:700;">Orphaned Subscription Payment</h2>
+    <p style="margin:0 0 16px;color:#374151;font-size:15px;line-height:1.6;">
+      A Stripe renewal charge succeeded, but no local subscription record matched it. The buyer has paid but their billing date and status were NOT updated. Please reconcile this payment and grant the buyer access manually.
+    </p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fef2f2;border-radius:8px;padding:16px;margin-bottom:24px;">
+      <tr><td style="padding:4px 0;color:#374151;font-size:14px;"><strong>Stripe subscription:</strong> <span style="font-family:monospace;">${esc(
+        params.stripeSubscriptionId
+      )}</span></td></tr>
+      <tr><td style="padding:4px 0;color:#374151;font-size:14px;"><strong>Invoice:</strong> <span style="font-family:monospace;">${esc(
+        params.invoiceId
+      )}</span></td></tr>
+      <tr><td style="padding:4px 0;color:#374151;font-size:14px;"><strong>Event:</strong> <span style="font-family:monospace;">${esc(
+        params.eventId
+      )}</span></td></tr>
+      <tr><td style="padding:4px 0;color:#374151;font-size:14px;"><strong>Amount paid:</strong> ${esc(
+        params.amountPaid
+      )} ${esc(params.currency)}</td></tr>
+      <tr><td style="padding:4px 0;color:#374151;font-size:14px;"><strong>Customer email:</strong> ${esc(
+        params.customerEmail
+      )}</td></tr>
+      <tr><td style="padding:4px 0;color:#374151;font-size:14px;"><strong>Billing reason:</strong> ${esc(
+        params.billingReason
+      )}</td></tr>
+    </table>
+    <p style="margin:0;color:#6b7280;font-size:13px;line-height:1.5;">
+      Filter logs on <code>ORPHANED_SUBSCRIPTION_PAYMENT</code> for history. The webhook returned 200 deliberately — retrying will never find the row.
+    </p>`;
+  return {
+    subject: `${BRAND_NAME}: Orphaned subscription payment needs manual reconciliation`,
+    html: baseTemplate("Orphaned Subscription Payment", body),
+  };
+}
+
+export function orphanedSubscriptionCancellationAlertEmail(params: {
+  stripeSubscriptionId: string;
+  eventId: string;
+  customer: string;
+  status: string;
+}): { subject: string; html: string } {
+  const body = `
+    <h2 style="margin:0 0 16px;color:#111827;font-size:20px;font-weight:700;">Orphaned Subscription Cancellation</h2>
+    <p style="margin:0 0 16px;color:#374151;font-size:15px;line-height:1.6;">
+      Stripe reports a subscription deleted, but no local subscription record matched it. The buyer may believe they canceled (or their access should now end) and was NOT notified. Please reconcile this cancellation manually.
+    </p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fef2f2;border-radius:8px;padding:16px;margin-bottom:24px;">
+      <tr><td style="padding:4px 0;color:#374151;font-size:14px;"><strong>Stripe subscription:</strong> <span style="font-family:monospace;">${esc(
+        params.stripeSubscriptionId
+      )}</span></td></tr>
+      <tr><td style="padding:4px 0;color:#374151;font-size:14px;"><strong>Event:</strong> <span style="font-family:monospace;">${esc(
+        params.eventId
+      )}</span></td></tr>
+      <tr><td style="padding:4px 0;color:#374151;font-size:14px;"><strong>Customer:</strong> <span style="font-family:monospace;">${esc(
+        params.customer
+      )}</span></td></tr>
+      <tr><td style="padding:4px 0;color:#374151;font-size:14px;"><strong>Status:</strong> ${esc(
+        params.status
+      )}</td></tr>
+    </table>
+    <p style="margin:0;color:#6b7280;font-size:13px;line-height:1.5;">
+      Filter logs on <code>ORPHANED_SUBSCRIPTION_CANCEL</code> for history. The webhook returned 200 deliberately — retrying will never find the row.
+    </p>`;
+  return {
+    subject: `${BRAND_NAME}: Orphaned subscription cancellation needs manual reconciliation`,
+    html: baseTemplate("Orphaned Subscription Cancellation", body),
+  };
+}
+
+export function orphanedSubscriptionReminderAlertEmail(params: {
+  stripeSubscriptionId: string;
+  invoiceId: string;
+  eventId: string;
+  customerEmail: string;
+}): { subject: string; html: string } {
+  const body = `
+    <h2 style="margin:0 0 16px;color:#111827;font-size:20px;font-weight:700;">Orphaned Renewal Reminder</h2>
+    <p style="margin:0 0 16px;color:#374151;font-size:15px;line-height:1.6;">
+      Stripe is about to charge a subscription renewal, but no local subscription record matched it. The buyer was NOT warned about the upcoming charge. Please reconcile this subscription manually before the renewal lands.
+    </p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fef2f2;border-radius:8px;padding:16px;margin-bottom:24px;">
+      <tr><td style="padding:4px 0;color:#374151;font-size:14px;"><strong>Stripe subscription:</strong> <span style="font-family:monospace;">${esc(
+        params.stripeSubscriptionId
+      )}</span></td></tr>
+      <tr><td style="padding:4px 0;color:#374151;font-size:14px;"><strong>Invoice:</strong> <span style="font-family:monospace;">${esc(
+        params.invoiceId
+      )}</span></td></tr>
+      <tr><td style="padding:4px 0;color:#374151;font-size:14px;"><strong>Event:</strong> <span style="font-family:monospace;">${esc(
+        params.eventId
+      )}</span></td></tr>
+      <tr><td style="padding:4px 0;color:#374151;font-size:14px;"><strong>Customer email:</strong> <span style="font-family:monospace;">${esc(
+        params.customerEmail
+      )}</span></td></tr>
+    </table>
+    <p style="margin:0;color:#6b7280;font-size:13px;line-height:1.5;">
+      Filter logs on <code>ORPHANED_SUBSCRIPTION_REMINDER</code> for history. The webhook returned 200 deliberately — retrying will never find the row.
+    </p>`;
+  return {
+    subject: `${BRAND_NAME}: Orphaned renewal reminder needs manual reconciliation`,
+    html: baseTemplate("Orphaned Renewal Reminder", body),
+  };
+}
+
+/**
+ * Generic ops alert for an ORPHANED_* Stripe event: money moved at Stripe but
+ * no local record matched. One template for every orphan marker so all of
+ * them share the same shape and stay in sync.
+ */
+export function orphanedStripeEventAlertEmail(params: {
+  title: string;
+  marker: string;
+  summary: string;
+  details: Array<{ label: string; value: string }>;
+}): { subject: string; html: string } {
+  const rows = params.details
+    .map(
+      (d) =>
+        `      <tr><td style="padding:4px 0;color:#374151;font-size:14px;"><strong>${esc(
+          d.label
+        )}:</strong> <span style="font-family:monospace;">${esc(
+          d.value
+        )}</span></td></tr>`
+    )
+    .join("\n");
+  const body = `
+    <h2 style="margin:0 0 16px;color:#111827;font-size:20px;font-weight:700;">${esc(
+      params.title
+    )}</h2>
+    <p style="margin:0 0 16px;color:#374151;font-size:15px;line-height:1.6;">
+      ${esc(params.summary)}
+    </p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fef2f2;border-radius:8px;padding:16px;margin-bottom:24px;">
+${rows}
+    </table>
+    <p style="margin:0;color:#6b7280;font-size:13px;line-height:1.5;">
+      Filter logs on <code>${esc(
+        params.marker
+      )}</code> for history. The webhook returned 200 deliberately — retrying will never find the row.
+    </p>`;
+  return {
+    subject: `${BRAND_NAME}: ${params.title} needs manual reconciliation`,
+    html: baseTemplate(params.title, body),
+  };
+}
+
 export function customDomainAdminNotificationEmail(params: {
   domain: string;
   domainType: "subdomain" | "apex";

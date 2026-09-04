@@ -17,9 +17,10 @@ seller/buyer from this function (e.g. a 404/403 gate) will block 100% of real
 traffic. `update-order-status` has this same latent issue but masks it because
 its client calls are fire-and-forget.
 
-**How to apply:** Never gate order endpoints on `getOrderParticipants` resolving.
-Treat it as best-effort: only enforce ownership _when_ it resolves; never reject
-on the (normal) null case.
+**How to apply:** Never gate order endpoints on `getOrderParticipants` resolving,
+but never treat the normal null result as permission either. Any role-sensitive
+server action needs a separate server-trusted order ledger that binds the order
+ID to authenticated buyer and seller identities.
 
 ## Order-status persistence is client-stamped (it was 100% dead)
 
@@ -42,11 +43,40 @@ it because the stamped `order_id` (= `orderTag || rumorId`) is always one of the
 **Why:** gift-wrap content is encrypted, so the server can never populate
 `order_id` itself — the client is the only party that knows the wrap↔order map.
 
-**Caveat:** because participants almost never resolve, the role matrix
-(seller-only "shipped", buyer-only "canceled") is effectively bypassed; any
-authenticated `p`-tag recipient of a wrap can set any valid status for that order.
-Accepted: keys live in encrypted content (unguessable), NIP-98 + rate limits +
-the re-stamp guard bound the blast radius.
+**Security rule:** because participants almost never resolve, falling back to the
+outer gift-wrap `pubkey` or `p` tag does not establish an order role. An attacker
+can create a correctly signed kind-1059 wrap, control its ephemeral author, and
+choose its recipient; client-stamping a known order ID then turns that untrusted
+metadata into a forged status record. NIP-98, rate limits, and a re-stamp guard
+do not fix the missing order-to-role binding.
+
+**Why:** encryption prevents the server from learning roles from the cached wrap,
+while the cleartext outer event fields are attacker-selected routing metadata.
+
+**How to apply:** Persist a server-trusted order record at order creation that
+binds the order ID to buyer and seller pubkeys. Authorize status changes against
+that record and enforce sequential transitions with an atomic compare-and-set.
+
+## seller_order_states init must stay seller-only (buyer-cancel squat vector)
+
+`transitionSellerOrderStatus` only lets the SELLER initialize a state row
+(actorPubkey === sellerPubkey). A "buyer can cancel their own pending order
+before the seller opens it" variant was tried (self-declared buyerPubkey +
+known wrap id) and **reverted**: gift-wrap ids and their p-tags are publicly
+observable on relays, so wrap-id knowledge is not authorship proof, and the
+buyer key is attacker-controlled. An attacker could init a `canceled` row for
+an observed wrap, squatting the `UNIQUE (seller_pubkey, source_message_id)`
+slot so the REAL order can never be initialized (insert no-ops on conflict).
+
+**Why:** code review caught this as broken access control / fulfillment DoS;
+pre-open buyer cancel is deferred until a server-verifiable buyer↔order
+binding exists at order creation.
+
+**How to apply:** do not re-add buyer-side init to `transitionSellerOrderStatus`
+(or sibling init paths) from caller-supplied buyer identity. The regression
+test (squat attempt → forbidden, no row, seller can still init the same wrap)
+lives in the testcontainers suite in `utils/db/__tests__/db-service.test.ts`
+(RUN_TESTCONTAINERS-gated — only enforced when run against a real DB).
 
 ## What order data IS server-trusted
 

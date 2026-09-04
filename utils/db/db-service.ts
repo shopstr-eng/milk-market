@@ -411,6 +411,16 @@ async function ensureTablesInitialized(): Promise<void> {
 }
 
 // Auto-create all tables if they don't exist
+
+// Loud, greppable marker for read accessors that deliberately swallow a DB
+// error into an empty value (null/[]/false) so public pages degrade instead
+// of 500ing. The empty value must mean "genuinely missing" — during an
+// outage it doesn't, so the marker is what makes the outage visible.
+// Grep: DB_LOOKUP_OUTAGE
+function logSwallowedDbOutage(context: string, error: unknown) {
+  console.error(`DB_LOOKUP_OUTAGE ${context}`, error);
+}
+
 async function initializeTables(): Promise<void> {
   if (tablesInitialized) return;
 
@@ -826,6 +836,7 @@ async function initializeTables(): Promise<void> {
           buyer_email TEXT NOT NULL,
           seller_pubkey TEXT NOT NULL,
           product_event_id TEXT NOT NULL,
+          connected_account_id TEXT,
           quantity INTEGER NOT NULL DEFAULT 1,
           variant_info JSONB,
           frequency TEXT NOT NULL CHECK (frequency IN ('weekly', 'every_2_weeks', 'monthly', 'every_2_months', 'quarterly')),
@@ -1733,6 +1744,7 @@ async function initializeTables(): Promise<void> {
 
       DO $sub_migrate_inline$
       BEGIN
+        ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS connected_account_id TEXT;
         ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_status_check;
         ALTER TABLE subscriptions
           ADD CONSTRAINT subscriptions_status_check
@@ -1820,6 +1832,63 @@ async function initializeTables(): Promise<void> {
           value TEXT,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+    `);
+
+    // Cashu escrow: verified buyer commitments + durable release/refund
+    // outbox. Keep in sync with db/schema.sql (self-host bootstrap).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS cashu_escrow_registrations (
+        escrow_id TEXT PRIMARY KEY,
+        buyer_pubkey TEXT NOT NULL,
+        seller_pubkey TEXT NOT NULL,
+        order_id TEXT NOT NULL,
+        amount_sats BIGINT NOT NULL CHECK (amount_sats > 0),
+        mint_url TEXT NOT NULL,
+        arbiter_pubkey TEXT,
+        expires_at TIMESTAMP NOT NULL,
+        commitment_event JSONB NOT NULL,
+        status TEXT NOT NULL DEFAULT 'locked'
+          CHECK (status IN ('locked', 'released', 'refunded')),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cashu_escrow_registrations_seller
+        ON cashu_escrow_registrations(seller_pubkey);
+      CREATE INDEX IF NOT EXISTS idx_cashu_escrow_registrations_buyer
+        ON cashu_escrow_registrations(buyer_pubkey);
+      CREATE INDEX IF NOT EXISTS idx_cashu_escrow_registrations_expiry
+        ON cashu_escrow_registrations(status, expires_at);
+
+      -- One payout action per escrow: outbox_id IS the escrow id, and the
+      -- UNIQUE keeps that true even for writers bypassing the service layer.
+      CREATE TABLE IF NOT EXISTS cashu_escrow_outbox (
+        outbox_id TEXT PRIMARY KEY,
+        escrow_id TEXT NOT NULL UNIQUE
+          REFERENCES cashu_escrow_registrations(escrow_id),
+        action TEXT NOT NULL CHECK (action IN ('release', 'refund')),
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'processing', 'done')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        claim_token TEXT,
+        claimed_at TIMESTAMP,
+        last_error TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cashu_escrow_outbox_pending
+        ON cashu_escrow_outbox(status, created_at);
+
+      -- Payout worker (task: escrow payouts). payout_payload carries the
+      -- payee-signed P2PK proofs the worker swaps at the mint;
+      -- payout_outputs records the payee-locked output proofs at finalize
+      -- so a crash can never silently burn them.
+      ALTER TABLE cashu_escrow_outbox ADD COLUMN IF NOT EXISTS payout_payload JSONB;
+      ALTER TABLE cashu_escrow_outbox ADD COLUMN IF NOT EXISTS payout_outputs JSONB;
+      -- Payee-locked swap outputs persisted before the mint call (crash
+      -- recovery via NUT-09 restore).
+      ALTER TABLE cashu_escrow_outbox ADD COLUMN IF NOT EXISTS prepared_outputs JSONB;
     `);
 
     await ensureAuthedSellersTable(client);
@@ -2320,7 +2389,7 @@ export async function fetchCachedEvents(
       sig: row.sig,
     }));
   } catch (error) {
-    console.error("Failed to fetch cached events:", error);
+    logSwallowedDbOutage("Failed to fetch cached events:", error);
     return [];
   } finally {
     if (client) {
@@ -2580,7 +2649,7 @@ export async function fetchAllProductsFromDb(
       sig: row.sig,
     }));
   } catch (error) {
-    console.error("Failed to fetch products from database:", error);
+    logSwallowedDbOutage("Failed to fetch products from database:", error);
     return [];
   } finally {
     if (client) {
@@ -2639,7 +2708,7 @@ export async function fetchProductsByPubkeyFromDb(
       sig: row.sig,
     }));
   } catch (error) {
-    console.error("Failed to fetch products by pubkey from database:", error);
+    logSwallowedDbOutage("Failed to fetch products by pubkey from database:", error);
     return [];
   } finally {
     if (client) {
@@ -2673,7 +2742,7 @@ export async function fetchProductByIdFromDb(
       sig: row.sig,
     };
   } catch (error) {
-    console.error("Failed to fetch product by id:", error);
+    logSwallowedDbOutage("Failed to fetch product by id:", error);
     return null;
   } finally {
     if (client) client.release();
@@ -2711,7 +2780,7 @@ export async function fetchProductByDTagAndPubkey(
       sig: row.sig,
     };
   } catch (error) {
-    console.error("Failed to fetch product by d-tag and pubkey:", error);
+    logSwallowedDbOutage("Failed to fetch product by d-tag and pubkey:", error);
     return null;
   } finally {
     if (client) client.release();
@@ -2755,7 +2824,7 @@ export async function fetchBlogPostsByPubkeyFromDb(
       }))
       .sort((a, b) => b.created_at - a.created_at);
   } catch (error) {
-    console.error("Failed to fetch blog posts by pubkey:", error);
+    logSwallowedDbOutage("Failed to fetch blog posts by pubkey:", error);
     return [];
   } finally {
     if (client) client.release();
@@ -2806,7 +2875,7 @@ export async function fetchStorefrontBlogPostEventsForSitemap(
       },
     }));
   } catch (error) {
-    console.error("Failed to fetch storefront blog posts for sitemap:", error);
+    logSwallowedDbOutage("Failed to fetch storefront blog posts for sitemap:", error);
     return [];
   } finally {
     if (client) client.release();
@@ -2848,7 +2917,7 @@ export async function fetchBlogPostByDTagAndPubkey(
       sig: row.sig,
     };
   } catch (error) {
-    console.error("Failed to fetch blog post by d-tag and pubkey:", error);
+    logSwallowedDbOutage("Failed to fetch blog post by d-tag and pubkey:", error);
     return null;
   } finally {
     if (client) client.release();
@@ -2920,7 +2989,7 @@ export async function fetchProductByTitleSlug(
     }
     return null;
   } catch (error) {
-    console.error("Failed to fetch product by title slug:", error);
+    logSwallowedDbOutage("Failed to fetch product by title slug:", error);
     return null;
   } finally {
     if (client) client.release();
@@ -2983,7 +3052,7 @@ export async function fetchProfilePubkeyByNameSlug(
 
     return disambiguatedMatch;
   } catch (error) {
-    console.error("Failed to fetch profile pubkey by name slug:", error);
+    logSwallowedDbOutage("Failed to fetch profile pubkey by name slug:", error);
     return null;
   } finally {
     if (client) client.release();
@@ -3016,7 +3085,7 @@ export async function fetchShopProfileByPubkeyFromDb(
       sig: row.sig,
     };
   } catch (error) {
-    console.error("Failed to fetch shop profile by pubkey:", error);
+    logSwallowedDbOutage("Failed to fetch shop profile by pubkey:", error);
     return null;
   } finally {
     if (client) client.release();
@@ -3037,7 +3106,7 @@ export async function fetchShopPubkeyBySlug(
     if (result.rows.length === 0) return null;
     return result.rows[0].pubkey;
   } catch (error) {
-    console.error("Failed to fetch shop pubkey by slug:", error);
+    logSwallowedDbOutage("Failed to fetch shop pubkey by slug:", error);
     return null;
   } finally {
     if (client) client.release();
@@ -3059,7 +3128,7 @@ export async function getShopSlugByPubkey(
     if (result.rows.length === 0) return null;
     return result.rows[0].slug;
   } catch (error) {
-    console.error("Failed to fetch shop slug by pubkey:", error);
+    logSwallowedDbOutage("Failed to fetch shop slug by pubkey:", error);
     return null;
   } finally {
     if (client) client.release();
@@ -3097,7 +3166,7 @@ export async function fetchCommunityByPubkeyAndIdentifier(
       sig: row.sig,
     };
   } catch (error) {
-    console.error("Failed to fetch community by pubkey and identifier:", error);
+    logSwallowedDbOutage("Failed to fetch community by pubkey and identifier:", error);
     return null;
   } finally {
     if (client) client.release();
@@ -3131,7 +3200,7 @@ export async function fetchProfileByPubkeyFromDb(
     }
     return null;
   } catch (error) {
-    console.error("Failed to fetch profile from database:", error);
+    logSwallowedDbOutage("Failed to fetch profile from database:", error);
     return null;
   } finally {
     if (client) client.release();
@@ -3168,7 +3237,7 @@ export async function fetchCommentsByReviewIds(
       sig: row.sig,
     }));
   } catch (error) {
-    console.error("Failed to fetch comments by review IDs:", error);
+    logSwallowedDbOutage("Failed to fetch comments by review IDs:", error);
     return [];
   } finally {
     if (client) client.release();
@@ -3244,7 +3313,7 @@ export async function fetchRelevantReportsFromDb(
       sig: row.sig,
     }));
   } catch (error) {
-    console.error("Failed to fetch relevant reports from database:", error);
+    logSwallowedDbOutage("Failed to fetch relevant reports from database:", error);
     return [];
   } finally {
     if (client) client.release();
@@ -3288,7 +3357,7 @@ export async function fetchAllMessagesFromDb(
       is_read: row.is_read,
     }));
   } catch (error) {
-    console.error("Failed to fetch messages from database:", error);
+    logSwallowedDbOutage("Failed to fetch messages from database:", error);
     return [];
   } finally {
     if (client) {
@@ -3441,6 +3510,16 @@ export async function transitionSellerOrderStatus(
     );
 
     if (result.rows.length === 0) {
+      // Init is seller-only: gift-wrap IDs and their p-tags are publicly
+      // visible on relays, so knowing a wrap's id does NOT prove the caller
+      // authored it. Allowing a self-declared buyer to init a "canceled"
+      // state would let anyone squat the UNIQUE (seller_pubkey,
+      // source_message_id) slot for an observed wrap and permanently block
+      // the real order from being initialized. Buyer-cancel before the
+      // seller opens the order therefore stays forbidden until a
+      // cryptographically verifiable buyer binding (e.g. presenting the
+      // signed order rumor) exists; persistSellerOrderStatusThrough
+      // separately guards against coercing canceled orders forward.
       if (
         input.actorPubkey !== input.sellerPubkey ||
         !input.messageId ||
@@ -3738,7 +3817,7 @@ export async function fetchAllProfilesFromDb(): Promise<NostrEvent[]> {
       sig: row.sig,
     }));
   } catch (error) {
-    console.error("Failed to fetch profiles from database:", error);
+    logSwallowedDbOutage("Failed to fetch profiles from database:", error);
     return [];
   } finally {
     if (client) {
@@ -3773,7 +3852,7 @@ export async function fetchAllWalletEventsFromDb(
       sig: row.sig,
     }));
   } catch (error) {
-    console.error("Failed to fetch wallet events from database:", error);
+    logSwallowedDbOutage("Failed to fetch wallet events from database:", error);
     return [];
   } finally {
     if (client) {
@@ -3815,7 +3894,7 @@ export async function fetchCommunityPostsFromDb(
       sig: row.sig,
     }));
   } catch (error) {
-    console.error("Failed to fetch community posts from database:", error);
+    logSwallowedDbOutage("Failed to fetch community posts from database:", error);
     return [];
   } finally {
     if (client) client.release();
@@ -3850,7 +3929,7 @@ export async function fetchCommunityApprovalsFromDb(
       sig: row.sig,
     }));
   } catch (error) {
-    console.error("Failed to fetch community approvals from database:", error);
+    logSwallowedDbOutage("Failed to fetch community approvals from database:", error);
     return [];
   } finally {
     if (client) client.release();
@@ -3964,8 +4043,10 @@ export async function getDiscountCodesByPubkey(pubkey: string): Promise<
       shipping_discount_value: Number(row.shipping_discount_value ?? 0),
     }));
   } catch (error) {
+    // Rethrow: an empty list must mean "seller has no codes", never a DB
+    // outage. Callers that want to degrade on error catch explicitly.
     console.error("Failed to fetch discount codes:", error);
-    return [];
+    throw error;
   } finally {
     if (client) {
       client.release();
@@ -4041,8 +4122,12 @@ export async function validateDiscountCode(
       shipping_discount_value: Number(shipping_discount_value ?? 0),
     };
   } catch (error) {
+    // Rethrow: { valid: false } must mean the code genuinely doesn't
+    // apply — a DB outage misreported as "invalid" silently overcharges a
+    // buyer holding a valid code. Callers that want to degrade on error
+    // catch explicitly.
     console.error("Failed to validate discount code:", error);
-    return { valid: false };
+    throw error;
   } finally {
     if (client) {
       client.release();
@@ -4204,7 +4289,7 @@ export async function getPopupEmailCapturesBySeller(
     );
     return result.rows as PopupEmailCaptureRow[];
   } catch (error) {
-    console.error("Failed to list popup email captures:", error);
+    logSwallowedDbOutage("Failed to list popup email captures:", error);
     return [];
   } finally {
     if (client) client.release();
@@ -4278,7 +4363,7 @@ export async function getSellerAudienceEmails(
       .map((row) => (typeof row.email === "string" ? row.email.trim() : ""))
       .filter((email) => email.length > 0);
   } catch (error) {
-    console.error("Failed to resolve seller audience emails:", error);
+    logSwallowedDbOutage("Failed to resolve seller audience emails:", error);
     return [];
   } finally {
     if (client) client.release();
@@ -4304,7 +4389,7 @@ export async function unsubscribeSellerEmail(
     );
     return true;
   } catch (error) {
-    console.error("Failed to record email unsubscribe:", error);
+    logSwallowedDbOutage("Failed to record email unsubscribe:", error);
     return false;
   } finally {
     if (client) client.release();
@@ -4329,7 +4414,7 @@ export async function isSellerEmailUnsubscribed(
     );
     return result.rows.length > 0;
   } catch (error) {
-    console.error("Failed to check email unsubscribe:", error);
+    logSwallowedDbOutage("Failed to check email unsubscribe:", error);
     return false;
   } finally {
     if (client) client.release();
@@ -4361,7 +4446,7 @@ export async function claimBlogBroadcast(
     );
     return (result.rowCount ?? 0) > 0;
   } catch (error) {
-    console.error("Failed to claim blog broadcast:", error);
+    logSwallowedDbOutage("Failed to claim blog broadcast:", error);
     return null;
   } finally {
     if (client) client.release();
@@ -4465,7 +4550,7 @@ export async function upsertScheduledBlogPost(params: {
     );
     return true;
   } catch (error) {
-    console.error("Failed to upsert scheduled blog post:", error);
+    logSwallowedDbOutage("Failed to upsert scheduled blog post:", error);
     return false;
   } finally {
     if (client) client.release();
@@ -4514,7 +4599,7 @@ export async function listScheduledBlogPosts(
     );
     return result.rows.map(mapScheduledBlogPostRow);
   } catch (error) {
-    console.error("Failed to list scheduled blog posts:", error);
+    logSwallowedDbOutage("Failed to list scheduled blog posts:", error);
     return [];
   } finally {
     if (client) client.release();
@@ -4536,7 +4621,7 @@ export async function deleteScheduledBlogPost(
     );
     return (result.rowCount ?? 0) > 0;
   } catch (error) {
-    console.error("Failed to delete scheduled blog post:", error);
+    logSwallowedDbOutage("Failed to delete scheduled blog post:", error);
     return false;
   } finally {
     if (client) client.release();
@@ -4578,7 +4663,7 @@ export async function claimDueScheduledBlogPosts(
     );
     return result.rows.map(mapScheduledBlogPostRow);
   } catch (error) {
-    console.error("Failed to claim due scheduled blog posts:", error);
+    logSwallowedDbOutage("Failed to claim due scheduled blog posts:", error);
     return [];
   } finally {
     if (client) client.release();
@@ -4668,7 +4753,7 @@ export async function getPopupEmailCapture(
     );
     return result.rows.length > 0 ? result.rows[0] : null;
   } catch (error) {
-    console.error("Failed to get popup email capture:", error);
+    logSwallowedDbOutage("Failed to get popup email capture:", error);
     return null;
   } finally {
     if (client) client.release();
@@ -4693,7 +4778,7 @@ export async function getPopupEmailCaptureByPhone(
     );
     return result.rows.length > 0 ? result.rows[0] : null;
   } catch (error) {
-    console.error("Failed to get popup email capture by phone:", error);
+    logSwallowedDbOutage("Failed to get popup email capture by phone:", error);
     return null;
   } finally {
     if (client) client.release();
@@ -4721,8 +4806,11 @@ export async function getStripeConnectAccount(pubkey: string): Promise<{
     if (result.rows.length === 0) return null;
     return result.rows[0];
   } catch (error) {
+    // Rethrow: payment/webhook callers must be able to tell a transient DB
+    // outage (500 + retry, fail closed) apart from a genuinely missing
+    // account (null). Callers that prefer null-on-error catch explicitly.
     console.error("Failed to get Stripe Connect account:", error);
-    return null;
+    throw error;
   } finally {
     if (client) client.release();
   }
@@ -4819,6 +4907,83 @@ export async function upsertStripeConnectAccount(
   }
 }
 
+// Mirror Stripe's account.updated flags into the cached seller row so stale
+// charges_enabled/payouts_enabled can't green-light transfers Stripe would
+// reject. Matches on stripe_account_id (not pubkey) because the webhook only
+// knows the account id. Returns the matched seller pubkey, or null when the
+// account isn't a marketplace seller (e.g. an affiliate or unknown account).
+// Throws on DB error: webhook callers must 500 + release the claim so Stripe
+// retries rather than silently leaving the cache stale.
+export async function syncStripeConnectAccountStateByStripeId(params: {
+  stripeAccountId: string;
+  chargesEnabled: boolean;
+  payoutsEnabled: boolean;
+  detailsSubmitted: boolean;
+}): Promise<string | null> {
+  const dbPool = getDbPool();
+  let client;
+
+  try {
+    client = await dbPool.connect();
+    const result = await client.query(
+      `UPDATE stripe_connect_accounts
+          SET charges_enabled = $2,
+              payouts_enabled = $3,
+              onboarding_complete = $4,
+              updated_at = CURRENT_TIMESTAMP
+        WHERE stripe_account_id = $1
+        RETURNING pubkey`,
+      [
+        params.stripeAccountId,
+        params.chargesEnabled,
+        params.payoutsEnabled,
+        // onboarding_complete mirrors details_submitted alone, matching the
+        // account-status.ts refresh path and initial Connect persistence —
+        // capability flags are tracked independently for payment gating.
+        params.detailsSubmitted,
+      ]
+    );
+    return (result.rows[0]?.pubkey as string | undefined) ?? null;
+  } catch (error) {
+    console.error("Failed to sync Stripe Connect account state:", error);
+    throw error;
+  } finally {
+    if (client) client.release();
+  }
+}
+
+// account.application.deauthorized: the seller revoked our OAuth grant, so
+// every cached capability flag is now false. The row (and stripe_account_id)
+// is retained for audit, mirroring the affiliate deauthorization pattern.
+// Returns the matched seller pubkey, or null when no seller row owns the
+// account. Throws on DB error so the webhook 500s and Stripe retries.
+export async function markStripeConnectDeauthorizedByStripeId(
+  stripeAccountId: string
+): Promise<string | null> {
+  const dbPool = getDbPool();
+  let client;
+
+  try {
+    client = await dbPool.connect();
+    const result = await client.query(
+      `UPDATE stripe_connect_accounts
+          SET charges_enabled = FALSE,
+              payouts_enabled = FALSE,
+              onboarding_complete = FALSE,
+              updated_at = CURRENT_TIMESTAMP
+        WHERE stripe_account_id = $1
+        RETURNING pubkey`,
+      [stripeAccountId]
+    );
+    return (result.rows[0]?.pubkey as string | undefined) ?? null;
+  } catch (error) {
+    console.error("Failed to mark Stripe Connect account deauthorized:", error);
+    throw error;
+  } finally {
+    if (client) client.release();
+  }
+}
+
 // Save notification email for a buyer (per order) or seller (per pubkey)
 export async function saveNotificationEmail(
   email: string,
@@ -4870,8 +5035,10 @@ export async function getSellerNotificationEmail(
     if (result.rows.length === 0) return null;
     return result.rows[0].email;
   } catch (error) {
+    // Rethrow: null must mean "genuinely no email on file", never a DB
+    // outage. Callers that want to degrade on error catch explicitly.
     console.error("Failed to get seller notification email:", error);
-    return null;
+    throw error;
   } finally {
     if (client) client.release();
   }
@@ -4893,8 +5060,10 @@ export async function getBuyerNotificationEmail(
     if (result.rows.length === 0) return null;
     return result.rows[0].email;
   } catch (error) {
+    // Rethrow: null must mean "genuinely no email on file", never a DB
+    // outage. Callers that want to degrade on error catch explicitly.
     console.error("Failed to get buyer notification email:", error);
-    return null;
+    throw error;
   } finally {
     if (client) client.release();
   }
@@ -4933,8 +5102,10 @@ export async function getUserAuthEmail(pubkey: string): Promise<string | null> {
 
     return null;
   } catch (error) {
+    // Rethrow: null must mean "genuinely no email on file", never a DB
+    // outage. Callers that want to degrade on error catch explicitly.
     console.error("Failed to get user auth email:", error);
-    return null;
+    throw error;
   } finally {
     if (client) client.release();
   }
@@ -4949,6 +5120,7 @@ export interface SubscriptionRecord {
   seller_pubkey: string;
   product_event_id: string;
   product_title: string | null;
+  connected_account_id: string | null;
   quantity: number;
   variant_info: any;
   frequency: string;
@@ -4980,6 +5152,7 @@ export async function createSubscription(data: {
   seller_pubkey: string;
   product_event_id: string;
   product_title?: string | null;
+  connected_account_id?: string | null;
   quantity?: number;
   variant_info?: any;
   frequency: string;
@@ -5000,10 +5173,11 @@ export async function createSubscription(data: {
     const result = await client.query(
       `INSERT INTO subscriptions (
         stripe_subscription_id, stripe_customer_id, buyer_pubkey, buyer_email,
-        seller_pubkey, product_event_id, product_title, quantity, variant_info, frequency,
+        seller_pubkey, product_event_id, product_title, connected_account_id,
+        quantity, variant_info, frequency,
         discount_percent, base_price, subscription_price, currency,
         shipping_address, status, next_billing_date, next_shipping_date
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
       RETURNING *`,
       [
         data.stripe_subscription_id,
@@ -5013,6 +5187,7 @@ export async function createSubscription(data: {
         data.seller_pubkey,
         data.product_event_id,
         data.product_title || null,
+        data.connected_account_id || null,
         data.quantity || 1,
         data.variant_info ? JSON.stringify(data.variant_info) : null,
         data.frequency,
@@ -5050,8 +5225,12 @@ export async function getSubscriptionByStripeId(
     if (result.rows.length === 0) return null;
     return result.rows[0];
   } catch (error) {
+    // Rethrow so callers can distinguish "no such row" (null) from a
+    // transient DB failure. Swallowing the error as null made webhook
+    // handlers treat a DB hiccup as a missing subscription — silently
+    // dropping a paid renewal with no Stripe retry.
     console.error("Failed to get subscription:", error);
-    return null;
+    throw error;
   } finally {
     if (client) client.release();
   }
@@ -5072,8 +5251,66 @@ export async function getSubscriptionById(
     if (result.rows.length === 0) return null;
     return result.rows[0];
   } catch (error) {
+    // Rethrow so callers can distinguish "no such row" (null) from a
+    // transient DB failure instead of reporting an outage as "not found".
     console.error("Failed to get subscription by id:", error);
-    return null;
+    throw error;
+  } finally {
+    if (client) client.release();
+  }
+}
+
+/**
+ * One-time backfill support: legacy rows (created before connected_account_id
+ * existed) have NULL there. Rethrows — an operator-run backfill must fail
+ * loudly rather than silently skip rows.
+ */
+export async function listSubscriptionsMissingConnectedAccount(): Promise<
+  Array<{ stripe_subscription_id: string; seller_pubkey: string }>
+> {
+  const dbPool = getDbPool();
+  let client;
+
+  try {
+    client = await dbPool.connect();
+    const result = await client.query(
+      `SELECT stripe_subscription_id, seller_pubkey FROM subscriptions WHERE connected_account_id IS NULL`
+    );
+    return result.rows;
+  } catch (error) {
+    console.error(
+      "Failed to list subscriptions missing connected account:",
+      error
+    );
+    throw error;
+  } finally {
+    if (client) client.release();
+  }
+}
+
+/**
+ * Stamp a verified Connect account onto a legacy subscription row. The
+ * WHERE clause re-checks connected_account_id IS NULL so a concurrent
+ * creator/backfill can never overwrite an already-stamped row. Returns
+ * whether the row was actually stamped. Rethrows — see above.
+ */
+export async function stampSubscriptionConnectedAccount(
+  stripeSubscriptionId: string,
+  accountId: string
+): Promise<boolean> {
+  const dbPool = getDbPool();
+  let client;
+
+  try {
+    client = await dbPool.connect();
+    const result = await client.query(
+      `UPDATE subscriptions SET connected_account_id = $2 WHERE stripe_subscription_id = $1 AND connected_account_id IS NULL`,
+      [stripeSubscriptionId, accountId]
+    );
+    return (result.rowCount ?? 0) > 0;
+  } catch (error) {
+    console.error("Failed to stamp subscription connected account:", error);
+    throw error;
   } finally {
     if (client) client.release();
   }
@@ -5093,8 +5330,10 @@ export async function getSubscriptionsByBuyerPubkey(
     );
     return result.rows;
   } catch (error) {
+    // Rethrow so callers can distinguish "no rows" ([]) from a transient DB
+    // failure instead of showing an empty list during an outage.
     console.error("Failed to get subscriptions by buyer pubkey:", error);
-    return [];
+    throw error;
   } finally {
     if (client) client.release();
   }
@@ -5114,8 +5353,10 @@ export async function getSubscriptionsByBuyerEmail(
     );
     return result.rows;
   } catch (error) {
+    // Rethrow so callers can distinguish "no rows" ([]) from a transient DB
+    // failure instead of showing an empty list during an outage.
     console.error("Failed to get subscriptions by buyer email:", error);
-    return [];
+    throw error;
   } finally {
     if (client) client.release();
   }
@@ -5135,8 +5376,11 @@ export async function getSubscriptionsBySellerPubkey(
     );
     return result.rows;
   } catch (error) {
+    // Rethrow so callers can distinguish "no rows" ([]) from a transient DB
+    // failure instead of reporting an outage as an empty subscription list
+    // (which callers like the MCP tools would surface as "not found").
     console.error("Failed to get subscriptions by seller pubkey:", error);
-    return [];
+    throw error;
   } finally {
     if (client) client.release();
   }
@@ -5271,8 +5515,10 @@ export async function getSubscriptionNotifications(
     );
     return result.rows;
   } catch (error) {
+    // Rethrow so callers can distinguish "no rows" ([]) from a transient DB
+    // failure instead of showing an empty list during an outage.
     console.error("Failed to get subscription notifications:", error);
-    return [];
+    throw error;
   } finally {
     if (client) client.release();
   }
@@ -5360,7 +5606,7 @@ export async function getEmailFlows(
     );
     return result.rows;
   } catch (error) {
-    console.error("Failed to get email flows:", error);
+    logSwallowedDbOutage("Failed to get email flows:", error);
     return [];
   } finally {
     if (client) client.release();
@@ -5382,7 +5628,7 @@ export async function getEmailFlow(
     if (result.rows.length === 0) return null;
     return result.rows[0];
   } catch (error) {
-    console.error("Failed to get email flow:", error);
+    logSwallowedDbOutage("Failed to get email flow:", error);
     return null;
   } finally {
     if (client) client.release();
@@ -6496,7 +6742,7 @@ export async function fetchProductByListingSlug(
       sig: row.sig,
     };
   } catch (error) {
-    console.error("Failed to fetch product by listing slug:", error);
+    logSwallowedDbOutage("Failed to fetch product by listing slug:", error);
     return null;
   } finally {
     if (client) client.release();

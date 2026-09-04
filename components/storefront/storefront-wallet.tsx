@@ -1,6 +1,9 @@
 import { useContext, useEffect, useState } from "react";
 import { StorefrontColorScheme } from "@/utils/types/types";
-import { SignerContext } from "@/components/utility-components/nostr-context-provider";
+import {
+  NostrContext,
+  SignerContext,
+} from "@/components/utility-components/nostr-context-provider";
 import MintButton from "@/components/wallet/mint-button";
 import ReceiveButton from "@/components/wallet/receive-button";
 import SendButton from "@/components/wallet/send-button";
@@ -21,6 +24,12 @@ import {
   restoreTokensFromProofEvents,
   syncMintsFromTokens,
 } from "@/utils/cashu/wallet-mint-sync";
+import {
+  describeEscrowBackupWarning,
+  describeEscrowRestore,
+  republishMissingEscrowBackups,
+  restoreEscrowsFromProofEvents,
+} from "@/utils/cashu/escrow-backup";
 import { CashuWalletContext } from "@/utils/context/context";
 
 interface StorefrontWalletProps {
@@ -28,9 +37,38 @@ interface StorefrontWalletProps {
 }
 
 export default function StorefrontWallet({ colors }: StorefrontWalletProps) {
-  const { isLoggedIn } = useContext(SignerContext);
+  const { isLoggedIn, signer } = useContext(SignerContext);
+  const { nostr } = useContext(NostrContext);
   const walletContext = useContext(CashuWalletContext);
   const router = useRouter();
+
+  // Self-heal: re-publish kind-7375 backups for any local escrow record that
+  // has none yet (checkout-time publish failed, or the escrow predates
+  // backups). Without this a lost browser would strand the locked proofs.
+  // Records that STILL have no backup after the retry (e.g. a remote signer
+  // without NIP-44 can never encrypt one) surface a visible warning — a
+  // silently-missing backup is a recovery path that doesn't exist.
+  const [escrowBackupWarning, setEscrowBackupWarning] = useState<string | null>(
+    null
+  );
+  useEffect(() => {
+    if (!isLoggedIn || !nostr || !signer) return;
+    republishMissingEscrowBackups(
+      nostr,
+      signer,
+      walletContext.proofEvents || []
+    )
+      .then((result) => {
+        setEscrowBackupWarning(
+          result.unbacked.length > 0
+            ? describeEscrowBackupWarning(result.unbacked[0]!.failure)
+            : null
+        );
+      })
+      .catch((err) =>
+        console.warn("[storefront-wallet] escrow backup republish failed:", err)
+      );
+  }, [isLoggedIn, nostr, signer, walletContext.proofEvents]);
 
   const [totalBalance, setTotalBalance] = useState(0);
   const [walletBalance, setWalletBalance] = useState(0);
@@ -185,29 +223,34 @@ export default function StorefrontWallet({ colors }: StorefrontWalletProps) {
   const [restoreStatus, setRestoreStatus] = useState<string | null>(null);
   const handleRestore = async () => {
     try {
+      // Escrow-locked proofs restore into `cashu_escrows` records, not the
+      // spendable wallet — restore both from the same kind-7375 backup.
+      const escrowResult = await restoreEscrowsFromProofEvents(
+        walletContext.proofEvents || []
+      );
       const { restoredCount, restoredSats, skippedCount } =
         await restoreTokensFromProofEvents(walletContext.proofEvents || []);
+      const escrowNotes = describeEscrowRestore(escrowResult);
+      let tokenStatus: string;
       if (restoredCount === 0 && skippedCount === 0) {
-        setRestoreStatus(
-          "Nothing to restore. Your local wallet already matches your nostr backup."
-        );
+        tokenStatus =
+          "Nothing to restore. Your local wallet already matches your nostr backup.";
       } else if (restoredCount === 0 && skippedCount > 0) {
-        setRestoreStatus(
-          `Couldn't verify ${skippedCount} proof${
-            skippedCount === 1 ? "" : "s"
-          } — a mint was unreachable. Try again in a moment.`
-        );
+        tokenStatus = `Couldn't verify ${skippedCount} proof${
+          skippedCount === 1 ? "" : "s"
+        } — a mint was unreachable. Try again in a moment.`;
       } else {
-        setRestoreStatus(
-          `Restored ${restoredCount} proof${
-            restoredCount === 1 ? "" : "s"
-          } (${restoredSats} sats) from nostr backup.${
-            skippedCount > 0
-              ? ` ${skippedCount} skipped (mint unreachable) — try again.`
-              : ""
-          }`
-        );
+        tokenStatus = `Restored ${restoredCount} proof${
+          restoredCount === 1 ? "" : "s"
+        } (${restoredSats} sats) from nostr backup.${
+          skippedCount > 0
+            ? ` ${skippedCount} skipped (mint unreachable) — try again.`
+            : ""
+        }`;
       }
+      setRestoreStatus(
+        escrowNotes ? `${tokenStatus} ${escrowNotes}` : tokenStatus
+      );
     } catch (err) {
       console.error("Restore failed:", err);
       setRestoreStatus("Restore failed. See console for details.");
@@ -297,6 +340,14 @@ export default function StorefrontWallet({ colors }: StorefrontWalletProps) {
               style={{ color: colors.background }}
             >
               {restoreStatus}
+            </p>
+          ) : null}
+          {escrowBackupWarning ? (
+            <p
+              className="rounded-md border-2 bg-yellow-300 px-4 py-2 text-center text-xs font-bold text-black"
+              style={{ borderColor: colors.text }}
+            >
+              {escrowBackupWarning}
             </p>
           ) : null}
         </div>

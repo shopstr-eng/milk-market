@@ -37,6 +37,14 @@ args = "Next.js Dev Server"
 task = "workflow.run"
 args = "test-ucp-geo"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Staging Cashu Mint"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "typecheck"
+
 [[workflows.workflow]]
 name = "Next.js Dev Server"
 author = "agent"
@@ -60,6 +68,28 @@ args = "npx jest __tests__/utils/ucp __tests__/utils/geo --no-coverage"
 [workflows.workflow.metadata]
 isValidation = true
 
+[[workflows.workflow]]
+name = "Staging Cashu Mint"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash scripts/staging-cashu-mint.sh"
+
+[[workflows.workflow]]
+name = "typecheck"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "NODE_OPTIONS='--max-old-space-size=3072' npx tsc --noEmit --incremental false"
+
+[workflows.workflow.metadata]
+isValidation = true
+
 [agent]
 expertMode = true
 integrations = ["sendgrid:1.0.0", "javascript_openai_ai_integrations:2.0.0", "javascript_anthropic_ai_integrations:2.0.0"]
@@ -70,6 +100,13 @@ integrations = ["sendgrid:1.0.0", "javascript_openai_ai_integrations:2.0.0", "ja
 
 [userenv.production]
 TRUST_PROXY_HEADERS = "true"
+
+[userenv.development]
+CASHU_ESCROW_ALLOWED_MINTS = "https://testnut.cashu.space,http://localhost:3338"
+CASHU_ESCROW_ARBITER_PUBKEYS = "487dfa272ad0f8cc304283157d3655bf54ac365a8c5f74210fa68301569d9618"
+CASHU_ESCROW_ENABLED = "true"
+NEXT_PUBLIC_CASHU_ESCROW_ENABLED = "true"
+NEXT_PUBLIC_CASHU_ESCROW_LOCK_SECONDS = "420"
 
 [postMerge]
 path = "scripts/post-merge.sh"

@@ -44,7 +44,9 @@ import { getSellerNotificationEmail } from "@/utils/db/db-service";
 import {
   sendProReceipt,
   sendProLifetimeLingeringCancelAlert,
+  sendOrphanedStripeEventAlert,
 } from "@/utils/email/email-service";
+import { sendDedupedOpsAlert } from "@/utils/email/deduped-ops-alert";
 import { sendServerSideNostrDM } from "@/utils/nostr/server-nostr-helpers";
 import { isSelfHostTenant } from "@/utils/self-host/config";
 
@@ -98,12 +100,6 @@ function logLifetimeLingeringCancel(
   }
 }
 
-// Once a stuck subscription has alerted the operator, suppress further alerts
-// for the same subscription for this long. A truly wedged subscription would
-// otherwise fire a fresh alert on every renewal-webhook auto-retry; the
-// structured logs still record every attempt for anyone watching.
-const LINGERING_CANCEL_ALERT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
-
 function lingeringCancelAlertDedupKey(subscriptionId: string): string {
   return `lifetime_lingering_cancel_alert:${subscriptionId}`;
 }
@@ -111,11 +107,12 @@ function lingeringCancelAlertDedupKey(subscriptionId: string): string {
 /**
  * Email the operator when a lingering-subscription cancel fails so they can
  * cancel it by hand before the seller is charged again — mirroring how transfer
- * failures already alert admin. Deduped per subscription via `pro_settings`: the
- * dedup timestamp is only written after a mail actually goes out, so a transient
- * mail failure still re-alerts on the next webhook retry, while a single stuck
- * subscription can't spam an alert on every renewal. Best-effort: never throws,
- * so it can't fail the webhook or block the (already best-effort) cancel path.
+ * failures already alert admin. Deduped per subscription (see
+ * sendDedupedOpsAlert): the dedup timestamp is only written after a mail
+ * actually goes out, so a transient mail failure still re-alerts on the next
+ * webhook retry, while a single stuck subscription can't spam an alert on
+ * every renewal. Best-effort: never throws, so it can't fail the webhook or
+ * block the (already best-effort) cancel path.
  */
 async function alertLifetimeLingeringCancelFailure(fields: {
   pubkey: string;
@@ -123,35 +120,20 @@ async function alertLifetimeLingeringCancelFailure(fields: {
   source: "purchase" | "renewal_webhook";
   error: unknown;
 }): Promise<void> {
-  try {
-    const dedupKey = lingeringCancelAlertDedupKey(fields.subscriptionId);
-    const last = await getProSetting(dedupKey);
-    if (last) {
-      const lastMs = new Date(last).getTime();
-      if (
-        Number.isFinite(lastMs) &&
-        Date.now() - lastMs < LINGERING_CANCEL_ALERT_COOLDOWN_MS
-      ) {
-        return;
-      }
-    }
-
-    const sent = await sendProLifetimeLingeringCancelAlert({
-      pubkey: fields.pubkey,
-      subscriptionId: fields.subscriptionId,
-      source: fields.source,
-      error:
-        fields.error instanceof Error
-          ? fields.error.message
-          : String(fields.error),
-    });
-
-    if (sent) {
-      await setProSetting(dedupKey, new Date().toISOString());
-    }
-  } catch (err) {
-    console.error("alertLifetimeLingeringCancelFailure failed:", err);
-  }
+  await sendDedupedOpsAlert({
+    dedupKey: lingeringCancelAlertDedupKey(fields.subscriptionId),
+    logTag: "alertLifetimeLingeringCancelFailure",
+    send: () =>
+      sendProLifetimeLingeringCancelAlert({
+        pubkey: fields.pubkey,
+        subscriptionId: fields.subscriptionId,
+        source: fields.source,
+        error:
+          fields.error instanceof Error
+            ? fields.error.message
+            : String(fields.error),
+      }),
+  });
 }
 
 export async function getMembershipView(
@@ -234,7 +216,8 @@ export async function startNewUserProTrial(
  * their already-stored period end passes.
  */
 export async function applyStripeSubscriptionToMembership(
-  sub: Stripe.Subscription
+  sub: Stripe.Subscription,
+  context?: { eventId?: string }
 ): Promise<void> {
   const mapped = mapStripeSubscription(sub);
 
@@ -246,9 +229,40 @@ export async function applyStripeSubscriptionToMembership(
     pubkey = existing?.pubkey ?? null;
   }
   if (!pubkey) {
-    console.warn(
-      "applyStripeSubscriptionToMembership: no pubkey for subscription",
-      mapped.subscriptionId
+    // Subscription state changed at Stripe but nothing local ties it to a
+    // seller: no mmProPubkey metadata and no pro_memberships row. The
+    // entitlement change is silently dropped unless ops reconciles manually,
+    // so this MUST be loud. Returning (not throwing) is correct — retrying
+    // will never manufacture the missing row.
+    // Grep: ORPHANED_PRO_SUBSCRIPTION
+    console.error(
+      `ORPHANED_PRO_SUBSCRIPTION stripe_subscription_id=${mapped.subscriptionId} ` +
+        `customer=${mapped.customerId || "unknown"} ` +
+        `event_id=${context?.eventId ?? "unknown"} status=${mapped.baseStatus} — ` +
+        `Pro subscription carries no pubkey metadata and no pro_memberships row ` +
+        `matched; membership state was NOT synced`
+    );
+    // A log line is only seen if someone goes looking; alert ops directly so
+    // a human reconciles promptly. Non-fatal — returning (not throwing) is
+    // correct because retrying will never manufacture the missing row.
+    await sendOrphanedStripeEventAlert({
+      title: "Orphaned Pro Subscription",
+      marker: "ORPHANED_PRO_SUBSCRIPTION",
+      logTag: "orphaned_pro_subscription",
+      summary:
+        "A Pro subscription state change at Stripe carries no pubkey metadata and no pro_memberships row matched; membership state was NOT synced.",
+      details: [
+        { label: "Stripe subscription", value: mapped.subscriptionId },
+        { label: "Customer", value: mapped.customerId || "unknown" },
+        { label: "Event", value: context?.eventId ?? "unknown" },
+        { label: "Status", value: mapped.baseStatus },
+      ],
+      adminEmail: process.env.DOMAINS_ADMIN_EMAIL,
+    }).catch((err) =>
+      console.error(
+        "[orphaned_pro_subscription] Failed to send ops alert email:",
+        err
+      )
     );
     return;
   }
@@ -712,13 +726,19 @@ export async function sendProManualReceiptEmail(
  * Notify a seller of a paid Stripe Pro invoice (renewal or initial charge) via
  * both an emailed receipt and a server-side Nostr DM. Resolves the pubkey from
  * the subscription's membership row, the term from the invoice line item, and
- * includes Stripe's hosted receipt + PDF links. Best-effort: never throws, so a
- * mail/DM failure can't fail the webhook. Skips zero-amount invoices (e.g. $0
- * trial invoices) since there's nothing to receipt. (Name kept for historical
- * call sites; now sends over both channels like the Pro lifecycle reminders.)
+ * includes Stripe's hosted receipt + PDF links. Best-effort for delivery: a
+ * mail/DM send failure can't fail the webhook. The membership LOOKUP is not
+ * best-effort — a thrown lookup propagates so the webhook 500s and Stripe
+ * retries, and a null row is logged loud (ORPHANED_PRO_RECEIPT): the caller
+ * only passes genuine Pro invoices, so a missing row means a paid Pro invoice
+ * with no entitlement row to receipt against. Skips zero-amount invoices
+ * (e.g. $0 trial invoices) since there's nothing to receipt. (Name kept for
+ * historical call sites; now sends over both channels like the Pro lifecycle
+ * reminders.)
  */
 export async function sendProStripeReceiptEmail(
-  invoice: Stripe.Invoice
+  invoice: Stripe.Invoice,
+  context?: { eventId?: string }
 ): Promise<void> {
   const amountCents = invoice.amount_paid ?? 0;
   if (amountCents <= 0) return;
@@ -729,14 +749,50 @@ export async function sendProStripeReceiptEmail(
       : (invoice as any).subscription?.id;
   if (!subscriptionId) return;
 
-  let pubkey: string | null = null;
-  try {
-    const membership = await getProMembershipBySubscription(subscriptionId);
-    pubkey = membership?.pubkey ?? null;
-  } catch (err) {
-    console.error("sendProStripeReceiptEmail: membership lookup failed", err);
+  // A thrown lookup is a transient outage — let it propagate (webhook 500 +
+  // claim release → Stripe retry) rather than silently dropping a receipt for
+  // a genuinely paid invoice.
+  const membership = await getProMembershipBySubscription(subscriptionId);
+  const pubkey: string | null = membership?.pubkey ?? null;
+  if (!pubkey) {
+    // Money moved at Stripe but no pro_memberships row matched, so the seller
+    // gets no receipt. Permanent (retrying will never find the row), so the
+    // webhook still 200s — but this MUST be loud for ops reconciliation.
+    // Grep: ORPHANED_PRO_RECEIPT
+    console.error(
+      `ORPHANED_PRO_RECEIPT stripe_subscription_id=${subscriptionId} ` +
+        `invoice_id=${invoice.id ?? "unknown"} ` +
+        `event_id=${context?.eventId ?? "unknown"} ` +
+        `amount_paid=${amountCents} currency=${invoice.currency ?? "unknown"} — ` +
+        `Pro invoice paid but no pro_memberships row matched; receipt was NOT sent`
+    );
+    // A log line is only seen if someone goes looking; alert ops directly.
+    // Non-fatal — the webhook still 200s because the row will never appear
+    // on retry.
+    await sendOrphanedStripeEventAlert({
+      title: "Orphaned Pro Receipt",
+      marker: "ORPHANED_PRO_RECEIPT",
+      logTag: "orphaned_pro_receipt",
+      summary:
+        "A Pro invoice was paid at Stripe but no pro_memberships row matched; the seller receipt was NOT sent.",
+      details: [
+        { label: "Stripe subscription", value: subscriptionId },
+        { label: "Invoice", value: invoice.id ?? "unknown" },
+        { label: "Event", value: context?.eventId ?? "unknown" },
+        {
+          label: "Amount paid",
+          value: `${amountCents} ${invoice.currency ?? "unknown"}`,
+        },
+      ],
+      adminEmail: process.env.DOMAINS_ADMIN_EMAIL,
+    }).catch((err) =>
+      console.error(
+        "[orphaned_pro_receipt] Failed to send ops alert email:",
+        err
+      )
+    );
+    return;
   }
-  if (!pubkey) return;
 
   const line = invoice.lines?.data?.[0] as any;
   const interval =

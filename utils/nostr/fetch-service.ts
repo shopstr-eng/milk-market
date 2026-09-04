@@ -31,17 +31,32 @@ import {
   markEventsRequestedForDeletion,
 } from "@/utils/cashu/deleted-event-tracker";
 import {
+  EscrowLockedSecretsResolution,
+  isEscrowLockedProof,
+  listEscrowLockedSecretsAsync,
+} from "@/utils/cashu/escrow-checkout";
+import {
   buildMessagesListProof,
   buildSignedHttpRequestProofTemplate,
   SIGNED_EVENT_HEADER,
 } from "@/utils/nostr/request-auth";
+import { latestContactList } from "@/utils/nostr/contact-list";
+import { fetchNip58ProfileBadges } from "@/utils/nostr/badges";
+import type { Nip58ProfileBadge } from "@/utils/types/types";
+import { isHexPubkey } from "@/utils/nostr/pubkey";
 
 interface NipProfile {
   pubkey: string;
   created_at: number;
   content: { nip05?: string; [key: string]: any };
   nip05Verified: boolean;
+  badges?: Nip58ProfileBadge[];
 }
+
+// Badge hydration happens after the profile fetch has completed. A later
+// profile/auth hydration invalidates earlier background badge work so it cannot
+// publish an old map over the newer context.
+let profileHydrationGeneration = 0;
 
 export function getUniqueProofs(proofs: Proof[]): Proof[] {
   const seenSecrets = new Set<string>();
@@ -345,15 +360,29 @@ export const fetchCart = async (
             const addressArray = JSON.parse(eventContent);
             cartAddressesArray = addressArray;
             for (const addressElement of addressArray) {
+              if (!Array.isArray(addressElement) || addressElement[0] !== "a") {
+                continue;
+              }
               const address = addressElement[1];
-              const [kind, _, dTag] = address;
-              if (kind === "30402") {
-                const foundEvent = products.find((event) =>
+              if (typeof address !== "string") continue;
+              const [kind, sellerPubkey, ...dParts] = address.split(":");
+              const dTag = dParts.join(":");
+              if (
+                kind !== "30402" ||
+                !sellerPubkey ||
+                !isHexPubkey(sellerPubkey) ||
+                !dTag
+              ) {
+                continue;
+              }
+              const foundEvent = products.find(
+                (event) =>
+                  event.kind === 30402 &&
+                  event.pubkey === sellerPubkey &&
                   event.tags.some((tag) => tag[0] === "d" && tag[1] === dTag)
-                );
-                if (foundEvent) {
-                  cartArrayFromRelay.push(parseTags(foundEvent) as ProductData);
-                }
+              );
+              if (foundEvent) {
+                cartArrayFromRelay.push(parseTags(foundEvent) as ProductData);
               }
             }
           }
@@ -562,6 +591,7 @@ export const fetchProfile = async (
 ): Promise<{
   profileMap: Map<string, NipProfile | null>;
 }> => {
+  const hydrationGeneration = ++profileHydrationGeneration;
   return new Promise(async function (resolve, reject) {
     try {
       if (!pubkeyProfilesToFetch.length) {
@@ -580,7 +610,16 @@ export const fetchProfile = async (
           !existingProfile ||
           (profile.created_at ?? 0) >= (existingProfile.created_at ?? 0)
         ) {
-          mergedProfileMap.set(profile.pubkey, profile);
+          // A kind-0 event does not contain badge state. Keep badges already
+          // validated for this profile visible until a conclusive NIP-58
+          // resolution replaces them.
+          mergedProfileMap.set(
+            profile.pubkey,
+            profile.badges === undefined &&
+              existingProfile?.badges !== undefined
+              ? { ...profile, badges: existingProfile.badges }
+              : profile
+          );
         }
       };
 
@@ -690,6 +729,36 @@ export const fetchProfile = async (
       editProfileContext(new Map(mergedProfileMap), false);
 
       resolve({ profileMap: mergedProfileMap });
+
+      // Do not make kind-0 profile publication wait for the several relay
+      // queries required by NIP-58. Only a complete result may replace badges,
+      // and only while this is still the latest profile hydration run.
+      void fetchNip58ProfileBadges(nostr, relays, pubkeyProfilesToFetch)
+        .then((badgeResults) => {
+          if (hydrationGeneration !== profileHydrationGeneration) return;
+
+          let badgesChanged = false;
+          for (const [pubkey, result] of badgeResults) {
+            if (!result.complete) continue;
+            const profile = mergedProfileMap.get(pubkey);
+            if (!profile) continue;
+            mergedProfileMap.set(pubkey, {
+              ...profile,
+              badges: result.badges,
+            });
+            badgesChanged = true;
+          }
+
+          if (
+            badgesChanged &&
+            hydrationGeneration === profileHydrationGeneration
+          ) {
+            editProfileContext(new Map(mergedProfileMap), false);
+          }
+        })
+        .catch((error) => {
+          console.error("Failed to fetch NIP-58 profile badges:", error);
+        });
     } catch (error) {
       reject(error);
     }
@@ -705,7 +774,7 @@ export const fetchGiftWrappedChatsAndMessages = async (
 ): Promise<{
   profileSetFromChats: Set<string>;
 }> => {
-  return new Promise(async function (resolve, reject) {
+  return new Promise(async function (resolve, _reject) {
     // if no userPubkey, user is not signed in
     if (!userPubkey) {
       editChatContext(new Map(), false);
@@ -820,7 +889,7 @@ export const fetchGiftWrappedChatsAndMessages = async (
         // signer, whose concurrent unlocks are coalesced single-flight).
         const processWraps = async (wraps: NostrEvent[]) => {
           const pending = wraps.filter(
-            (e) => e?.id && !processedWrapIds.has(e.id)
+            (e): e is NostrEvent => !!e?.id && !processedWrapIds.has(e.id)
           );
           if (pending.length === 0) return;
           const CONCURRENCY = 8; // cap concurrent decrypts to stay courteous to bunker signers
@@ -829,7 +898,9 @@ export const fetchGiftWrappedChatsAndMessages = async (
           const worker = async () => {
             while (cursor < pending.length) {
               const i = cursor++;
-              decrypted[i] = await decryptWrap(pending[i]);
+              const pendingEvent = pending[i];
+              if (!pendingEvent) continue;
+              decrypted[i] = await decryptWrap(pendingEvent);
             }
           };
           await Promise.all(
@@ -841,6 +912,7 @@ export const fetchGiftWrappedChatsAndMessages = async (
 
           for (let i = 0; i < pending.length; i++) {
             const event = pending[i];
+            if (!event) continue;
             processedWrapIds.add(event.id);
             const messageEvent = decrypted[i];
             if (!messageEvent) continue;
@@ -1269,7 +1341,8 @@ export const fetchAllFollows = async (
   editFollowsContext: (
     followList: string[],
     firstDegreeFollowsLength: number,
-    isLoading: boolean
+    isLoading: boolean,
+    directFollowList?: string[]
   ) => void,
   userPubkey?: string
 ): Promise<{
@@ -1278,7 +1351,7 @@ export const fetchAllFollows = async (
   const wot = getLocalStorageData().wot;
 
   if (!userPubkey) {
-    editFollowsContext([], 0, false);
+    editFollowsContext([], 0, false, []);
     return {
       followList: [],
     };
@@ -1301,25 +1374,19 @@ export const fetchAllFollows = async (
       relays
     );
 
-    const latestContactListEvent = fetchedEvents.reduce<NostrEvent | null>(
-      (latestEvent, event) => {
-        if (!latestEvent || event.created_at > latestEvent.created_at) {
-          return event;
-        }
-        return latestEvent;
-      },
-      null
-    );
+    const latestContactListEvent = latestContactList(fetchedEvents);
 
     if (!latestContactListEvent) {
       return {
         followsArrayFromRelay: [],
         firstDegreeFollowsLength: 0,
+        directFollowList: [],
       };
     }
 
     const authors: string[] = [];
     const directFollowsArrayFromRelay = latestContactListEvent.tags
+      .filter((tag) => tag[0] === "p")
       .map((tag) => tag[1])
       .filter((pubkey) => isHexString(pubkey!) && !followsSet.has(pubkey!));
     directFollowsArrayFromRelay.forEach((pubkey) => followsSet.add(pubkey!));
@@ -1330,6 +1397,7 @@ export const fetchAllFollows = async (
       return {
         followsArrayFromRelay: [],
         firstDegreeFollowsLength,
+        directFollowList: directFollowsArrayFromRelay as string[],
       };
     }
 
@@ -1355,6 +1423,7 @@ export const fetchAllFollows = async (
 
     for (const followEvent of latestSecondDegreeEvents.values()) {
       const validFollowTags = followEvent.tags
+        .filter((tag) => tag[0] === "p")
         .map((tag) => tag[1])
         .filter((pubkey) => isHexString(pubkey!) && !followsSet.has(pubkey!));
       secondDegreeFollowsArrayFromRelay.push(...(validFollowTags as string[]));
@@ -1379,12 +1448,18 @@ export const fetchAllFollows = async (
     return {
       followsArrayFromRelay,
       firstDegreeFollowsLength,
+      directFollowList: directFollowsArrayFromRelay as string[],
     };
   };
 
-  const { followsArrayFromRelay, firstDegreeFollowsLength } =
+  const { followsArrayFromRelay, firstDegreeFollowsLength, directFollowList } =
     await fetchFollows(userPubkey);
-  editFollowsContext(followsArrayFromRelay, firstDegreeFollowsLength, false);
+  editFollowsContext(
+    followsArrayFromRelay,
+    firstDegreeFollowsLength,
+    false,
+    directFollowList
+  );
   return {
     followList: followsArrayFromRelay,
   };
@@ -1671,7 +1746,53 @@ export const fetchCashuWallet = async (
       const cashuRelays: string[] = [];
       const cashuMints: string[] = [];
       const cashuMintSet: Set<string> = new Set();
-      let cashuProofs: Proof[] = [...tokens]; // Start with existing tokens
+      // Escrow-locked proofs must NEVER count as spendable balance — not
+      // even ones an old version leaked into localStorage["tokens"] before
+      // the lock path stopped writing them there. Resolve the locked-secret
+      // set ASYNC so legacy records (no lockedSecrets, v2-keyset tokens that
+      // need a mint keyset fetch to decode) are recognized too. If a legacy
+      // record can't be decoded this pass (mint unreachable), fail CLOSED:
+      // P2PK-shaped secrets — the shape every escrow-locked proof carries
+      // and no legitimately-stored wallet proof ever has — are treated as
+      // locked, so unresolved escrow material still can't render spendable.
+      let escrowResolution: EscrowLockedSecretsResolution = {
+        secrets: new Set<string>(),
+        hasUnresolvedLegacy: false,
+      };
+      try {
+        escrowResolution = await listEscrowLockedSecretsAsync();
+      } catch {
+        // Even a wholesale failure here must not break wallet hydration;
+        // the empty resolution simply strips nothing this pass.
+      }
+      const isEscrowLocked = (p: Proof): boolean =>
+        isEscrowLockedProof(p, escrowResolution);
+      // Reconcile the stored token list so the next refresh can't resurrect
+      // a leaked locked proof. CONCURRENCY-SAFE: re-read current storage
+      // immediately before the write and remove only locked entries from
+      // THAT value — a send/swap that persisted fresh change proofs while
+      // the async resolution above was in flight keeps them.
+      try {
+        const rawTokens = localStorage.getItem("tokens");
+        const currentTokens: unknown = rawTokens ? JSON.parse(rawTokens) : [];
+        if (
+          Array.isArray(currentTokens) &&
+          currentTokens.some(isEscrowLocked)
+        ) {
+          localStorage.setItem(
+            "tokens",
+            JSON.stringify(
+              currentTokens.filter((p: Proof) => !isEscrowLocked(p))
+            )
+          );
+        }
+      } catch {
+        // Persisting the cleanup is hygiene; the in-memory strip below
+        // already keeps the locked proofs out of this run's balance.
+      }
+      let cashuProofs: Proof[] = [...tokens].filter(
+        (p: Proof) => !isEscrowLocked(p)
+      ); // Start with existing tokens, minus escrow-locked
       const incomingSpendingHistory: [][] = [];
       // Secrets we positively determine SPENT during this run (mint state +
       // spending history). Used by the pre-resolve localStorage delta-merge so
@@ -1734,15 +1855,27 @@ export const fetchCashuWallet = async (
                     mint: cashuWalletEventContent.mint,
                     proofs: cashuWalletEventContent.proofs,
                     created_at: event.created_at,
+                    // Preserve the escrow marker (utils/cashu/escrow-backup.ts)
+                    // so restore can rebuild the buyer's escrow records from
+                    // the database copy — the publish path caches backups to
+                    // the DB before relays, so this branch may be the only
+                    // place a fresh backup is visible.
+                    ...(cashuWalletEventContent.escrow
+                      ? { escrow: cashuWalletEventContent.escrow }
+                      : {}),
                   });
                   if (!cashuMintSet.has(cashuWalletEventContent.mint)) {
                     cashuMintSet.add(cashuWalletEventContent.mint);
                     cashuMints.push(cashuWalletEventContent.mint);
                   }
-                  cashuProofs = getUniqueProofs([
-                    ...cashuProofs,
-                    ...cashuWalletEventContent.proofs,
-                  ]);
+                  // Escrow-marked backups are NOT spendable wallet balance
+                  // (P2PK-locked proofs) — keep them out of cashuProofs.
+                  if (!cashuWalletEventContent.escrow) {
+                    cashuProofs = getUniqueProofs([
+                      ...cashuProofs,
+                      ...cashuWalletEventContent.proofs,
+                    ]);
+                  }
                 } else if (event.kind === 7376 && cashuWalletEventContent) {
                   incomingSpendingHistory.push(cashuWalletEventContent);
                 }
@@ -1924,6 +2057,14 @@ export const fetchCashuWallet = async (
                 mint: cashuWalletEventContent.mint,
                 proofs: cashuWalletEventContent.proofs,
                 created_at: event.created_at,
+                // Escrow backups (utils/cashu/escrow-backup.ts) carry an
+                // `escrow` marker. Keep it so restore can rebuild the
+                // buyer's escrow records — but never merge these proofs
+                // into the spendable wallet below: they are P2PK-locked
+                // escrow funds, not balance.
+                ...(cashuWalletEventContent.escrow
+                  ? { escrow: cashuWalletEventContent.escrow }
+                  : {}),
               });
 
               // Add mint to our set if not already present
@@ -1932,11 +2073,15 @@ export const fetchCashuWallet = async (
                 cashuMints.push(cashuWalletEventContent.mint);
               }
 
-              // Add proofs to our collection (will be filtered later)
-              cashuProofs = getUniqueProofs([
-                ...cashuProofs,
-                ...cashuWalletEventContent.proofs,
-              ]);
+              // Add proofs to our collection (will be filtered later).
+              // Escrow-marked backups are excluded — locked proofs are not
+              // spendable wallet balance.
+              if (!cashuWalletEventContent.escrow) {
+                cashuProofs = getUniqueProofs([
+                  ...cashuProofs,
+                  ...cashuWalletEventContent.proofs,
+                ]);
+              }
             }
           } else if (event.kind === 7376 && cashuWalletEventContent) {
             // Process spending history events
@@ -1995,9 +2140,12 @@ export const fetchCashuWallet = async (
               if (spentYs.has(Ys[idx]!)) spentSecrets.add(mp.secret);
             });
 
-            // Mark fully spent proof events for deletion
+            // Mark fully spent proof events for deletion. Escrow backups are
+            // exempt: they are the buyer's recovery material for unresolved
+            // escrows (custody rule — records are never truncated), so a
+            // boot-time cleanup must not delete them.
             for (const proofEvent of proofEvents) {
-              if (proofEvent.mint === mint) {
+              if (proofEvent.mint === mint && !proofEvent.escrow) {
                 const eventYs = proofEvent.proofs.map((p: Proof) =>
                   hashToCurve(enc.encode(p.secret)).toHex(true)
                 );
@@ -2063,8 +2211,13 @@ export const fetchCashuWallet = async (
           (id) => !outProofIds.includes(id)
         );
 
+        // Escrow-marked backups publish no spending history, so their ids
+        // never appear here — the `!event.escrow` guard is belt-and-braces
+        // against a foreign client having written history for them.
         const proofsToAddBack = proofEvents
-          .filter((event) => proofIdsToAddBack.includes(event.id))
+          .filter(
+            (event) => proofIdsToAddBack.includes(event.id) && !event.escrow
+          )
           .flatMap((event) => event.proofs);
 
         cashuProofs = getUniqueProofs([...cashuProofs, ...proofsToAddBack]);
@@ -2114,7 +2267,8 @@ export const fetchCashuWallet = async (
               p &&
               p.secret &&
               !known.has(p.secret) &&
-              !spentSecrets.has(p.secret)
+              !spentSecrets.has(p.secret) &&
+              !isEscrowLocked(p)
           );
           if (additions.length > 0) {
             cashuProofs = getUniqueProofs([...cashuProofs, ...additions]);
@@ -2265,7 +2419,7 @@ export const fetchCommunityPosts = async (
   limit: number = 20,
   onCachedPosts?: (posts: NostrEvent[]) => void
 ): Promise<NostrEvent[]> => {
-  return new Promise(async (resolve, reject) => {
+  return new Promise(async (resolve, _reject) => {
     if (!community) {
       resolve([]);
       return;

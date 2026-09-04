@@ -4,11 +4,14 @@ import {
   getStripeConnectAccount,
   getSellerNotificationEmail,
   getSubscriptionByStripeId,
+  markStripeConnectDeauthorizedByStripeId,
+  syncStripeConnectAccountStateByStripeId,
 } from "@/utils/db/db-service";
 import {
   sendPaymentFailedToBuyer,
   sendPaymentFailedToSeller,
   sendTransferFailureAlert,
+  sendOrphanedStripeEventAlert,
 } from "@/utils/email/email-service";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", {
@@ -21,6 +24,7 @@ export const config = {
   },
 };
 import { applyRateLimit } from "@/utils/rate-limit";
+import { verifyWithAnySecret } from "@/utils/stripe/webhook-secrets";
 import {
   claimStripeEvent,
   finalizeStripeEvent,
@@ -51,9 +55,20 @@ export default async function handler(
 
   if (!(await applyRateLimit(req, res, "stripe-webhook", RATE_LIMIT))) return;
 
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!webhookSecret) {
-    console.error("STRIPE_WEBHOOK_SECRET not configured");
+  // Events reach this route from TWO Stripe webhook endpoints on the same
+  // URL: an account-scoped endpoint (platform events: application_fee.*,
+  // platform payment_intents/invoices) and a Connect endpoint (events for
+  // objects on sellers' connected accounts: direct-charge payment_intents,
+  // connected-account subscription invoices, account.updated). Stripe signs
+  // each endpoint with its own signing secret, so accept either.
+  const webhookSecrets = [
+    process.env.STRIPE_WEBHOOK_SECRET,
+    process.env.STRIPE_WEBHOOK_CONNECT_SECRET,
+  ].filter((s): s is string => !!s);
+  if (webhookSecrets.length === 0) {
+    console.error(
+      "STRIPE_WEBHOOK_SECRET / STRIPE_WEBHOOK_CONNECT_SECRET not configured"
+    );
     return res.status(500).json({ error: "Webhook secret not configured" });
   }
 
@@ -62,7 +77,7 @@ export default async function handler(
   try {
     const rawBody = await getRawBody(req);
     const sig = req.headers["stripe-signature"] as string;
-    event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
+    event = verifyWithAnySecret(stripe, rawBody, sig, webhookSecrets);
   } catch (err) {
     console.error("Webhook signature verification failed:", err);
     return res
@@ -70,29 +85,35 @@ export default async function handler(
       .json({ error: "Webhook signature verification failed" });
   }
 
+  // The claim token (claim timestamp) fences releaseStripeEvent: if this
+  // worker stalls past the stale window and another worker reclaims the
+  // event, this worker's error path must not delete the new owner's claim.
+  // Declared outside the try so the catch-site release can read them.
+  let claimToken: number | null = null;
+  let claimFailed = false;
   try {
-    let claimed = true;
     try {
-      claimed = await claimStripeEvent(event.id, event.type);
+      claimToken = await claimStripeEvent(event.id, event.type);
     } catch (claimErr) {
       // If the claim table is unavailable, fail-open so we still process the
       // event rather than silently dropping it. Duplicate handling will at
       // worst send a duplicate email — preferable to silent loss.
+      claimFailed = true;
       console.warn("claimStripeEvent failed, processing anyway:", claimErr);
     }
-    if (!claimed) {
+    if (!claimFailed && claimToken === null) {
       return res.status(200).json({ received: true, deduped: true });
     }
 
     switch (event.type) {
       case "invoice.paid": {
         const invoice = event.data.object as Stripe.Invoice;
-        await handleInvoicePaid(invoice);
+        await handleInvoicePaid(invoice, event);
         break;
       }
       case "invoice.payment_failed": {
         const invoice = event.data.object as Stripe.Invoice;
-        await handleInvoicePaymentFailed(invoice);
+        await handleInvoicePaymentFailed(invoice, event.id);
         break;
       }
       case "payment_intent.succeeded": {
@@ -109,19 +130,58 @@ export default async function handler(
         // shipping label on the seller's own Shippo account if enabled.
         if (pi.metadata?.source === "mcp" && pi.metadata?.orderId) {
           const orderId = pi.metadata.orderId;
-          try {
-            const { updateMcpOrderPayment } =
-              await import("@/mcp/tools/purchase-tools");
-            await updateMcpOrderPayment(orderId, pi.id, "paid");
-          } catch (e) {
-            console.error("Failed to mark MCP order paid from webhook:", e);
-          }
-          try {
-            const { autoPurchaseForMcpOrder } =
-              await import("@/utils/shipping/auto-purchase");
-            await autoPurchaseForMcpOrder(orderId);
-          } catch (e) {
-            console.error("Auto label purchase (mcp webhook) failed:", e);
+          // A DB failure here must throw (500 + claim release → Stripe retry):
+          // swallowing it would leave a SETTLED card payment with the order
+          // never marked paid and no useful retry. A null return means no
+          // mcp_orders row matched — permanent, so be loud and move on (200;
+          // retrying will never find the row). Grep: ORPHANED_MCP_ORDER_PAYMENT
+          const { updateMcpOrderPayment } =
+            await import("@/mcp/tools/purchase-tools");
+          const updated = await updateMcpOrderPayment(orderId, pi.id, "paid");
+          if (!updated) {
+            console.error(
+              `ORPHANED_MCP_ORDER_PAYMENT order_id=${orderId} ` +
+                `payment_intent=${pi.id} event_id=${event.id} ` +
+                `amount=${pi.amount ?? "unknown"} currency=${
+                  pi.currency ?? "unknown"
+                } — agent card payment settled but no mcp_orders row matched; ` +
+                `order was NOT marked paid and no shipping label was purchased`
+            );
+            // A log line is only seen if someone goes looking; alert ops
+            // directly. Non-fatal — the 200 stands because the row will
+            // never appear on retry.
+            await sendOrphanedStripeEventAlert({
+              title: "Orphaned MCP Order Payment",
+              marker: "ORPHANED_MCP_ORDER_PAYMENT",
+              logTag: "orphaned_mcp_order_payment",
+              summary:
+                "Agent card payment settled but no mcp_orders row matched; the order was NOT marked paid and no shipping label was purchased.",
+              details: [
+                { label: "Order", value: orderId },
+                { label: "PaymentIntent", value: pi.id },
+                { label: "Event", value: event.id },
+                {
+                  label: "Amount",
+                  value: `${pi.amount ?? "unknown"} ${
+                    pi.currency ?? "unknown"
+                  }`,
+                },
+              ],
+              adminEmail: process.env.DOMAINS_ADMIN_EMAIL,
+            }).catch((err) =>
+              console.error(
+                "[orphaned_mcp_order_payment] Failed to send ops alert email:",
+                err
+              )
+            );
+          } else {
+            try {
+              const { autoPurchaseForMcpOrder } =
+                await import("@/utils/shipping/auto-purchase");
+              await autoPurchaseForMcpOrder(orderId);
+            } catch (e) {
+              console.error("Auto label purchase (mcp webhook) failed:", e);
+            }
           }
         }
         break;
@@ -165,35 +225,46 @@ export default async function handler(
         // affiliate. We key off paymentIntent.metadata.{orderId,sellerPubkey}
         // because that's what create-payment-intent + cart write through.
         const charge = event.data.object as Stripe.Charge;
-        try {
-          const piId =
-            typeof charge.payment_intent === "string"
-              ? charge.payment_intent
-              : charge.payment_intent?.id;
-          if (piId) {
-            const pi = await stripe.paymentIntents.retrieve(piId);
-            const orderId = (pi.metadata && pi.metadata.orderId) || piId;
-            const sellerPubkey = pi.metadata?.sellerPubkey;
-            if (sellerPubkey) {
-              const sellers = sellerPubkey.includes(",")
-                ? sellerPubkey.split(",")
-                : [sellerPubkey];
-              for (const sp of sellers) {
-                await reverseReferralsForOrder({
-                  orderId,
-                  sellerPubkey: sp.trim(),
-                  // Pass both amounts so the helper can scale the rebate
-                  // proportionally on partial refunds instead of clawing
-                  // the whole thing back.
-                  originalGrossSmallest: charge.amount ?? 0,
-                  refundedSmallest: charge.amount_refunded ?? 0,
-                  refundEventRef: event.id,
-                });
-              }
+        // No try/catch here on purpose: a transient failure (Stripe hiccup on
+        // the PI retrieve, DB outage in reverseReferralsForOrder) must surface
+        // as a 500 + claim release so Stripe retries. Swallowing it would
+        // silently skip the referral reversal and the seller would overpay the
+        // affiliate. Retries are safe — the reversal is keyed on event.id. A
+        // PI without sellerPubkey metadata simply has no attributable
+        // referral, so the no-op is the correct handling for that null case.
+        const piId =
+          typeof charge.payment_intent === "string"
+            ? charge.payment_intent
+            : charge.payment_intent?.id;
+        if (piId) {
+          // Direct charges live on the seller's connected account; a
+          // platform-scope retrieve would 404 them. Connect events carry the
+          // account on event.account — scope the retrieve to it.
+          const chargeAccount = (event as Stripe.Event & { account?: string })
+            .account;
+          const pi = await stripe.paymentIntents.retrieve(
+            piId,
+            chargeAccount ? { stripeAccount: chargeAccount } : undefined
+          );
+          const orderId = (pi.metadata && pi.metadata.orderId) || piId;
+          const sellerPubkey = pi.metadata?.sellerPubkey;
+          if (sellerPubkey) {
+            const sellers = sellerPubkey.includes(",")
+              ? sellerPubkey.split(",")
+              : [sellerPubkey];
+            for (const sp of sellers) {
+              await reverseReferralsForOrder({
+                orderId,
+                sellerPubkey: sp.trim(),
+                // Pass both amounts so the helper can scale the rebate
+                // proportionally on partial refunds instead of clawing
+                // the whole thing back.
+                originalGrossSmallest: charge.amount ?? 0,
+                refundedSmallest: charge.amount_refunded ?? 0,
+                refundEventRef: event.id,
+              });
             }
           }
-        } catch (e) {
-          console.warn("affiliate refund reversal failed:", e);
         }
         break;
       }
@@ -220,6 +291,9 @@ export default async function handler(
             const { markAffiliateStripeDeauthorized } =
               await import("@/utils/db/affiliates");
             const matched = await markAffiliateStripeDeauthorized(acctId);
+            // A null match is expected, not an orphan: every seller Connect
+            // account deauthorization also reaches this endpoint, and seller
+            // account state is tracked outside the affiliates table.
             if (matched) {
               console.log(
                 `AFFILIATE_STRIPE_DEAUTHORIZED affiliate=${matched} acct=${acctId}`
@@ -229,6 +303,20 @@ export default async function handler(
             console.error(
               "account.application.deauthorized affiliate sync failed:",
               err
+            );
+          }
+          // Marketplace seller Connect accounts live in
+          // stripe_connect_accounts, not affiliates. Flip their cached flags
+          // off too, or a deauthorized seller keeps looking chargeable.
+          // Deliberately NOT wrapped in a swallowing try/catch: a DB outage
+          // must surface as a 500 + claim release so Stripe retries, rather
+          // than leaving stale flags cached. A null match just means the
+          // account isn't a marketplace seller — quiet no-op.
+          const sellerMatched =
+            await markStripeConnectDeauthorizedByStripeId(acctId);
+          if (sellerMatched) {
+            console.log(
+              `SELLER_STRIPE_DEAUTHORIZED seller=${sellerMatched} acct=${acctId}`
             );
           }
         }
@@ -261,6 +349,26 @@ export default async function handler(
         } catch (err) {
           console.error("account.updated affiliate sync failed:", err);
         }
+        // Marketplace seller Connect accounts live in stripe_connect_accounts,
+        // not affiliates. Sync the same flags into the seller row so stale
+        // charges_enabled can't enable transfers Stripe would reject.
+        // Deliberately NOT wrapped in a swallowing try/catch: a DB outage
+        // must surface as a 500 + claim release so Stripe retries, rather
+        // than leaving stale flags cached. A null match just means the
+        // account isn't a marketplace seller — quiet no-op.
+        const sellerMatched = await syncStripeConnectAccountStateByStripeId({
+          stripeAccountId: account.id,
+          chargesEnabled: !!account.charges_enabled,
+          payoutsEnabled: !!account.payouts_enabled,
+          detailsSubmitted: !!account.details_submitted,
+        });
+        if (sellerMatched) {
+          console.log(
+            `SELLER_STRIPE_ACCOUNT_UPDATED seller=${sellerMatched} acct=${account.id} ` +
+              `charges=${account.charges_enabled} payouts=${account.payouts_enabled} ` +
+              `details=${account.details_submitted}`
+          );
+        }
         break;
       }
       default:
@@ -282,14 +390,20 @@ export default async function handler(
     console.error("Webhook handler error:", error);
     // Release the claim so Stripe's retry can reprocess immediately — otherwise
     // the un-finalized claim would only be reclaimable after the stale window.
-    await releaseStripeEvent(event.id).catch((releaseErr) =>
+    await releaseStripeEvent(
+      event.id,
+      claimFailed ? undefined : (claimToken ?? undefined)
+    ).catch((releaseErr) =>
       console.error("stripe webhook claim release failed:", releaseErr)
     );
     return res.status(500).json({ error: "Webhook handler error" });
   }
 }
 
-async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
+async function handleInvoicePaymentFailed(
+  invoice: Stripe.Invoice,
+  eventId: string
+) {
   const invoiceAny = invoice as any;
   const subscriptionId = invoiceAny.subscription
     ? typeof invoiceAny.subscription === "string"
@@ -319,9 +433,49 @@ async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
   }
 
   if (subscriptionId) {
-    try {
-      const dbSubscription = await getSubscriptionByStripeId(subscriptionId);
-      if (dbSubscription?.seller_pubkey) {
+    // A thrown lookup is a transient outage: let it propagate so the webhook
+    // 500s, releases the event claim, and Stripe retries (a duplicate buyer
+    // email on retry is preferable to silent loss). A null row is permanent —
+    // retrying will never find it — so return 200 but be LOUD: the seller is
+    // otherwise never told a recurring payment failed.
+    // Grep: ORPHANED_SUBSCRIPTION_PAYMENT_FAILED
+    const dbSubscription = await getSubscriptionByStripeId(subscriptionId);
+    if (!dbSubscription) {
+      console.error(
+        `ORPHANED_SUBSCRIPTION_PAYMENT_FAILED stripe_subscription_id=${subscriptionId} ` +
+          `invoice_id=${invoice.id} event_id=${eventId} ` +
+          `customer_email=${customerEmail || "unknown"} ` +
+          `amount_due=${amountDue ?? "unknown"} currency=${currency} — ` +
+          `recurring payment failed at Stripe but no subscriptions row matched; ` +
+          `seller failure notification was NOT sent`
+      );
+      // A log line is only seen if someone goes looking; alert ops directly.
+      // Non-fatal — the 200 stands because the row will never appear on retry.
+      await sendOrphanedStripeEventAlert({
+        title: "Orphaned Subscription Payment Failure",
+        marker: "ORPHANED_SUBSCRIPTION_PAYMENT_FAILED",
+        logTag: "orphaned_subscription_payment_failed",
+        summary:
+          "A recurring payment failed at Stripe but no subscriptions row matched; the seller failure notification was NOT sent.",
+        details: [
+          { label: "Stripe subscription", value: subscriptionId },
+          { label: "Invoice", value: invoice.id ?? "unknown" },
+          { label: "Event", value: eventId },
+          { label: "Customer email", value: customerEmail || "unknown" },
+          {
+            label: "Amount due",
+            value: `${amountDue ?? "unknown"} ${currency}`,
+          },
+        ],
+        adminEmail: process.env.DOMAINS_ADMIN_EMAIL,
+      }).catch((err) =>
+        console.error(
+          "[orphaned_subscription_payment_failed] Failed to send ops alert email:",
+          err
+        )
+      );
+    } else if (dbSubscription.seller_pubkey) {
+      try {
         const sellerEmail = await getSellerNotificationEmail(
           dbSubscription.seller_pubkey
         );
@@ -333,14 +487,19 @@ async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
             amountDisplay,
           });
         }
+      } catch (err) {
+        console.error("Failed to send payment failure email to seller:", err);
       }
-    } catch (err) {
-      console.error("Failed to send payment failure email to seller:", err);
     }
   }
 }
 
-async function handleInvoicePaid(invoice: Stripe.Invoice) {
+function isStripeResourceMissing(err: unknown): boolean {
+  const e = err as { code?: string; statusCode?: number } | null;
+  return !!e && (e.code === "resource_missing" || e.statusCode === 404);
+}
+
+async function handleInvoicePaid(invoice: Stripe.Invoice, event: Stripe.Event) {
   const invoiceAny = invoice as any;
   if (!invoiceAny.subscription) return;
 
@@ -349,7 +508,78 @@ async function handleInvoicePaid(invoice: Stripe.Invoice) {
       ? invoiceAny.subscription
       : invoiceAny.subscription.id;
 
-  const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+  // Recurring subscriptions live on the seller's Connect account, so a
+  // platform-account retrieve would not find them. Account scope priority:
+  // the row's recorded connected_account_id wins; with no row, fall back to
+  // the Connect account the event was delivered for (event.account) before
+  // trying the platform account. A thrown DB lookup is a transient outage and
+  // must propagate (webhook 500 + claim release → Stripe retry) — swallowing
+  // it as null would retrieve from the wrong account and misfile a
+  // connected-account renewal as orphaned.
+  const dbSubscription = await getSubscriptionByStripeId(subscriptionId);
+  const connectedAccountId = (dbSubscription as any)?.connected_account_id as
+    | string
+    | null
+    | undefined;
+  const eventAccount = (event as Stripe.Event & { account?: string }).account;
+  const retrieveAccount = connectedAccountId ?? eventAccount ?? undefined;
+
+  let subscription: Stripe.Subscription;
+  try {
+    subscription = await stripe.subscriptions.retrieve(
+      subscriptionId,
+      retrieveAccount ? { stripeAccount: retrieveAccount } : undefined
+    );
+  } catch (err) {
+    // No local row AND the subscription is not retrievable under the scope
+    // the event was delivered for (platform endpoint → platform account,
+    // Connect endpoint → that connected account): the renewal settled on an
+    // account we have no record of, so the seller transfers below can never
+    // run and retrying is pointless. Return 200 but be LOUD so ops can
+    // reconcile the orphaned payment manually.
+    // Grep: ORPHANED_SUBSCRIPTION_INVOICE_PAID
+    if (!dbSubscription && isStripeResourceMissing(err)) {
+      console.error(
+        `ORPHANED_SUBSCRIPTION_INVOICE_PAID stripe_subscription_id=${subscriptionId} ` +
+          `invoice_id=${invoice.id} event_id=${event.id} ` +
+          `account=${retrieveAccount ?? "platform"} ` +
+          `amount_paid=${invoiceAny.amount_paid ?? "unknown"} ` +
+          `currency=${invoice.currency ?? "unknown"} — ` +
+          `invoice paid at Stripe but no subscriptions row matched and the ` +
+          `subscription is not retrievable from the delivering account; ` +
+          `seller transfers were NOT processed`
+      );
+      // A log line is only seen if someone goes looking; alert ops directly.
+      // Non-fatal — the 200 stands because the row will never appear on retry.
+      await sendOrphanedStripeEventAlert({
+        title: "Orphaned Subscription Invoice Paid",
+        marker: "ORPHANED_SUBSCRIPTION_INVOICE_PAID",
+        logTag: "orphaned_subscription_invoice_paid",
+        summary:
+          "An invoice was paid at Stripe but no subscriptions row matched and the subscription is not retrievable from the delivering account; seller transfers were NOT processed.",
+        details: [
+          { label: "Stripe subscription", value: subscriptionId },
+          { label: "Invoice", value: invoice.id ?? "unknown" },
+          { label: "Event", value: event.id },
+          { label: "Account", value: retrieveAccount ?? "platform" },
+          {
+            label: "Amount paid",
+            value: `${invoiceAny.amount_paid ?? "unknown"} ${
+              invoice.currency ?? "unknown"
+            }`,
+          },
+        ],
+        adminEmail: process.env.DOMAINS_ADMIN_EMAIL,
+      }).catch((alertErr) =>
+        console.error(
+          "[orphaned_subscription_invoice_paid] Failed to send ops alert email:",
+          alertErr
+        )
+      );
+      return;
+    }
+    throw err;
+  }
   const metadata = subscription.metadata;
 
   if (metadata.isMultiMerchant !== "true") return;
@@ -394,40 +624,61 @@ async function handleInvoicePaid(invoice: Stripe.Invoice) {
     (s) => s.pubkey !== process.env.NEXT_PUBLIC_MILK_MARKET_PK
   );
 
+  // Resolve any missing Connect account ids for ALL splits BEFORE creating
+  // the first transfer. getStripeConnectAccount rethrows on DB error, and
+  // that throw must abort here — transfers.create below is not idempotent
+  // across a webhook retry, so a lookup outage mid-loop would 500 with some
+  // sellers already paid and the retry would pay them again. Aborting before
+  // any money moves makes the 500 + claim release + Stripe retry safe.
+  // A null row is permanent (seller genuinely has no account) and stays a
+  // per-split failedTransfer + ops alert, never a retry.
+  const resolvedAccountIds = new Map<string, string>();
+  for (const split of sellerSplits) {
+    if (split.pubkey === process.env.NEXT_PUBLIC_MILK_MARKET_PK) continue;
+    if (split.accountId) continue;
+    const connectAccount = await getStripeConnectAccount(split.pubkey);
+    if (!connectAccount || !connectAccount.charges_enabled) {
+      const msg = `Cannot transfer to seller ${split.pubkey} — no Stripe account`;
+      console.error(msg);
+      failedTransfers.push({
+        pubkey: split.pubkey,
+        amountCents: split.amountCents,
+        error: msg,
+      });
+      continue;
+    }
+    resolvedAccountIds.set(split.pubkey, connectAccount.stripe_account_id);
+  }
+
   for (const split of sellerSplits) {
     const isPlatformAccount =
       split.pubkey === process.env.NEXT_PUBLIC_MILK_MARKET_PK;
     if (isPlatformAccount) continue;
 
-    let accountId = split.accountId;
-    if (!accountId) {
-      const connectAccount = await getStripeConnectAccount(split.pubkey);
-      if (!connectAccount || !connectAccount.charges_enabled) {
-        const msg = `Cannot transfer to seller ${split.pubkey} — no Stripe account`;
-        console.error(msg);
-        failedTransfers.push({
-          pubkey: split.pubkey,
-          amountCents: split.amountCents,
-          error: msg,
-        });
-        continue;
-      }
-      accountId = connectAccount.stripe_account_id;
-    }
+    const accountId = split.accountId || resolvedAccountIds.get(split.pubkey);
+    if (!accountId) continue; // already recorded in failedTransfers above
 
     try {
-      await stripe.transfers.create({
-        amount: split.amountCents,
-        currency: transferCurrency,
-        destination: accountId,
-        transfer_group: transferGroup,
-        metadata: {
-          subscriptionId,
-          invoiceId: invoice.id,
-          sellerPubkey: split.pubkey,
-          paymentIntentId: paymentIntentId || "",
+      // Deterministic idempotency key: if anything uncaught throws later in
+      // the loop, the 500 releases the event claim and Stripe retries the
+      // webhook — without the key, sellers whose transfers already succeeded
+      // would be paid twice. Keyed on invoice.id + seller pubkey (NOT
+      // transferGroup, which is shared across a subscription's renewals).
+      await stripe.transfers.create(
+        {
+          amount: split.amountCents,
+          currency: transferCurrency,
+          destination: accountId,
+          transfer_group: transferGroup,
+          metadata: {
+            subscriptionId,
+            invoiceId: invoice.id,
+            sellerPubkey: split.pubkey,
+            paymentIntentId: paymentIntentId || "",
+          },
         },
-      });
+        { idempotencyKey: `invoice-${invoice.id}-transfer-${split.pubkey}` }
+      );
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error(
@@ -452,33 +703,18 @@ async function handleInvoicePaid(invoice: Stripe.Invoice) {
     );
 
     try {
-      const dbSubscription = await getSubscriptionByStripeId(subscriptionId);
-      const sellerPubkey = dbSubscription?.seller_pubkey;
-      let alertEmail: string | null = null;
-
-      if (sellerPubkey) {
-        alertEmail = await getSellerNotificationEmail(sellerPubkey);
-      }
-
-      if (!alertEmail) {
-        const { fromEmail } =
-          await import("@/utils/email/sendgrid-client").then((m) =>
-            m.getUncachableSendGridClient()
-          );
-        alertEmail = fromEmail;
-      }
-
-      if (alertEmail) {
-        await sendTransferFailureAlert(alertEmail, {
-          subscriptionId,
-          invoiceId: invoice.id,
-          failures: failedTransfers.map((f) => ({
-            sellerPubkey: f.pubkey,
-            amountCents: f.amountCents,
-            error: f.error,
-          })),
-        });
-      }
+      // Ops-side alert only: sendTransferFailureAlert resolves the shared ops
+      // recipient (explicit admin email > verified platform sender), never a
+      // seller's notification email.
+      await sendTransferFailureAlert({
+        subscriptionId,
+        invoiceId: invoice.id,
+        failures: failedTransfers.map((f) => ({
+          sellerPubkey: f.pubkey,
+          amountCents: f.amountCents,
+          error: f.error,
+        })),
+      });
     } catch (emailErr) {
       console.error("Failed to send transfer failure alert email:", emailErr);
     }

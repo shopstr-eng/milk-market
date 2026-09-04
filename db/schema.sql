@@ -351,6 +351,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     seller_pubkey TEXT NOT NULL,
     product_event_id TEXT NOT NULL,
     product_title TEXT,
+    connected_account_id TEXT,
     quantity INTEGER NOT NULL DEFAULT 1,
     variant_info JSONB,
     frequency TEXT NOT NULL CHECK (frequency IN ('weekly', 'every_2_weeks', 'monthly', 'every_2_months', 'quarterly')),
@@ -954,3 +955,57 @@ CREATE TABLE IF NOT EXISTS rate_limit_counters (
 );
 
 CREATE INDEX IF NOT EXISTS idx_rate_limit_counters_reset_at ON rate_limit_counters(reset_at);
+
+-- Cashu escrow: verified buyer commitments + durable release/refund outbox.
+-- Keep in sync with the runtime bootstrap in utils/db/db-service.ts
+-- (initializeTables), which is authoritative for hosted environments.
+CREATE TABLE IF NOT EXISTS cashu_escrow_registrations (
+    escrow_id TEXT PRIMARY KEY,
+    buyer_pubkey TEXT NOT NULL,
+    seller_pubkey TEXT NOT NULL,
+    order_id TEXT NOT NULL,
+    amount_sats BIGINT NOT NULL CHECK (amount_sats > 0),
+    mint_url TEXT NOT NULL,
+    arbiter_pubkey TEXT,
+    expires_at TIMESTAMP NOT NULL,
+    commitment_event JSONB NOT NULL,
+    status TEXT NOT NULL DEFAULT 'locked'
+        CHECK (status IN ('locked', 'released', 'refunded')),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_cashu_escrow_registrations_seller
+    ON cashu_escrow_registrations(seller_pubkey);
+CREATE INDEX IF NOT EXISTS idx_cashu_escrow_registrations_buyer
+    ON cashu_escrow_registrations(buyer_pubkey);
+CREATE INDEX IF NOT EXISTS idx_cashu_escrow_registrations_expiry
+    ON cashu_escrow_registrations(status, expires_at);
+
+-- One payout action per escrow: outbox_id IS the escrow id, and the UNIQUE
+-- keeps that true even for writers bypassing the service layer.
+CREATE TABLE IF NOT EXISTS cashu_escrow_outbox (
+    outbox_id TEXT PRIMARY KEY,
+    escrow_id TEXT NOT NULL UNIQUE
+        REFERENCES cashu_escrow_registrations(escrow_id),
+    action TEXT NOT NULL CHECK (action IN ('release', 'refund')),
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'processing', 'done')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    claim_token TEXT,
+    claimed_at TIMESTAMP,
+    last_error TEXT,
+    -- Signed P2PK payout proofs the worker swaps at the mint, and the
+    -- payee-locked output proofs recorded when the payout finalizes.
+    payout_payload JSONB,
+    payout_outputs JSONB,
+    -- Payee-locked swap outputs persisted after prepare and BEFORE the mint
+    -- call, so a crash mid-swap is recoverable via the mint's NUT-09
+    -- /restore endpoint instead of burning the payout.
+    prepared_outputs JSONB,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_cashu_escrow_outbox_pending
+    ON cashu_escrow_outbox(status, created_at);

@@ -24,11 +24,13 @@ import {
   deleteFlowStep,
   getFlowEnrollments,
   getSubscriptionsBySellerPubkey,
+  getStripeConnectAccount,
   getDbPool,
 } from "@/utils/db/db-service";
 import dns from "dns";
 import { promisify } from "util";
 import { registerTool } from "./register-tool";
+import { sumProofAmounts } from "@/utils/cashu/proof-amount";
 import { setStock } from "@/utils/db/inventory-service";
 import { derivePaymentPreference } from "@/utils/lightning/direct-lnurl";
 import {
@@ -986,7 +988,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
             pubkey,
             limit: 1,
           });
-          if (existingEvents.length > 0 && existingEvents[0].content) {
+          if (existingEvents.length > 0 && existingEvents[0]?.content) {
             existingContent = JSON.parse(existingEvents[0].content);
           }
         } catch {}
@@ -1375,6 +1377,12 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
         .describe(
           "Whether the storefront accepts Bitcoin (Lightning/Cashu/NWC) at checkout. Set false to hide all Bitcoin buttons — only honored when a card or fiat method is also available (a buyer is never left with no way to pay). Omit/true = accepted (default)."
         ),
+      storefrontAcceptsEscrow: z
+        .boolean()
+        .optional()
+        .describe(
+          "Whether buyers paying with Cashu may opt into escrow (funds locked to you with a buyer refund path after the lock expires). Opt-IN: omit/false = not offered (default). Checkout only offers escrow when the deployment also enables it."
+        ),
     },
     async (params) => {
       const startTime = Date.now();
@@ -1391,7 +1399,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
             pubkey,
             limit: 1,
           });
-          if (existingEvents.length > 0 && existingEvents[0].content) {
+          if (existingEvents.length > 0 && existingEvents[0]?.content) {
             existingContent = JSON.parse(existingEvents[0].content);
           }
         } catch {}
@@ -1472,6 +1480,8 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
           storefront.paymentMethodOrder = params.storefrontPaymentMethodOrder;
         if (params.storefrontAcceptBitcoin !== undefined)
           storefront.acceptBitcoin = params.storefrontAcceptBitcoin;
+        if (params.storefrontAcceptsEscrow !== undefined)
+          storefront.acceptsEscrow = params.storefrontAcceptsEscrow;
         if (Object.keys(storefront).length > 0) content.storefront = storefront;
 
         const eventTemplate: EventTemplate = {
@@ -2055,7 +2065,9 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
         const stripKeys = (keys: string[]) => {
           const set = new Set(keys);
           for (let i = baseTags.length - 1; i >= 0; i--) {
-            if (set.has(baseTags[i][0])) baseTags.splice(i, 1);
+            const tag = baseTags[i];
+            if (tag?.[0] !== undefined && set.has(tag[0]))
+              baseTags.splice(i, 1);
           }
         };
 
@@ -3885,10 +3897,9 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
             const parsed = JSON.parse(decryptedContent);
             const mintUrl = parsed.mint;
             const proofs = parsed.proofs || [];
-            const amount = proofs.reduce(
-              (sum: number, p: any) => sum + (p.amount || 0),
-              0
-            );
+            // Stored proofs may carry string amounts (Amount instances
+            // serialize as strings in the kind-7375 JSON).
+            const amount = sumProofAmounts(proofs);
 
             if (!params.mintUrl || mintUrl === params.mintUrl) {
               totalBalance += amount;
@@ -3931,14 +3942,18 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
       if (!signer) return noSignerError();
 
       try {
-        const { getDecodedToken } = await import("@cashu/cashu-ts");
-        const decoded = getDecodedToken(params.token, []);
+        // Keyset-aware decode (v2 keyset IDs, Nutshell >= 0.20). The server
+        // adapter routes the fallback keyset fetch through the SSRF guard
+        // (public mints only).
+        const { decodeTokenWithKeysets } = await import(
+          "@/utils/cashu/token-decode-server"
+        );
+        const decoded = await decodeTokenWithKeysets(params.token);
         const mintUrl = decoded.mint;
         const proofs = decoded.proofs;
-        const totalAmount = proofs.reduce(
-          (sum: number, p: any) => sum + (p.amount || 0),
-          0
-        );
+        // v4 decodes amounts as Amount instances — `sum + (p.amount || 0)`
+        // string-concatenated them ("0100"), corrupting reported totals.
+        const totalAmount = sumProofAmounts(proofs);
 
         const pubkey = signer.getPubKey();
 
@@ -4110,11 +4125,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
         const totalNeeded =
           (meltQuote.amount as any).toNumber() +
           ((meltQuote.fee_reserve as any)?.toNumber?.() || 0);
-        const totalAvailable = availableProofs.reduce(
-          (sum: number, p: any) =>
-            sum + (p.amount?.toNumber?.() ?? p.amount ?? 0),
-          0
-        );
+        const totalAvailable = sumProofAmounts(availableProofs);
 
         if (totalAvailable < totalNeeded) {
           return errorResponse(
@@ -4148,11 +4159,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
             amount: (meltQuote.amount as any).toNumber(),
             fee: (meltQuote.fee_reserve as any)?.toNumber?.() || 0,
             mintUrl,
-            change: meltOutcome.changeProofs.reduce(
-              (sum: number, p: any) =>
-                sum + (p.amount?.toNumber?.() ?? p.amount ?? 0),
-              0
-            ),
+            change: sumProofAmounts(meltOutcome.changeProofs),
           },
           startTime
         );
@@ -6600,6 +6607,14 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
             })
           )
         );
+        // Target the Connect account the subscription was actually created
+        // on (recorded at creation time) so a seller who reconnects a
+        // different Stripe account doesn't orphan the old subscription.
+        // Legacy rows have no stored account; fall back to the seller's
+        // current Connect account.
+        const connectedAccountId =
+          owned.connected_account_id ??
+          (await getStripeConnectAccount(pubkey))?.stripe_account_id;
         const res = await fetch(`${baseUrl}/api/stripe/cancel-subscription`, {
           method: "POST",
           headers: {
@@ -6608,7 +6623,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
           },
           body: JSON.stringify({
             subscriptionId: params.subscriptionId,
-            connectedAccountId: owned.connected_account_id,
+            connectedAccountId,
           }),
         });
         const data = await res.json();
@@ -6683,6 +6698,14 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
             })
           )
         );
+        // Target the Connect account the subscription was actually created
+        // on (recorded at creation time) so a seller who reconnects a
+        // different Stripe account doesn't orphan the old subscription.
+        // Legacy rows have no stored account; fall back to the seller's
+        // current Connect account.
+        const connectedAccountId =
+          owned.connected_account_id ??
+          (await getStripeConnectAccount(pubkey))?.stripe_account_id;
         const res = await fetch(`${baseUrl}/api/stripe/update-subscription`, {
           method: "POST",
           headers: {
@@ -6691,7 +6714,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
           },
           body: JSON.stringify({
             subscriptionId: params.subscriptionId,
-            connectedAccountId: owned.connected_account_id,
+            connectedAccountId,
             shippingAddress: params.shippingAddress,
             nextBillingDate: params.nextBillingDate,
           }),
@@ -6729,7 +6752,7 @@ export function registerWriteTools(server: McpServer, apiKey: ApiKeyRecord) {
         .optional()
         .describe("Recipient's Nostr pubkey if known (optional)"),
       enrollmentData: z
-        .record(z.any())
+        .record(z.string(), z.any())
         .optional()
         .describe(
           "Per-enrollment template variables merged into every step (e.g. { first_name: 'Alice' })"
