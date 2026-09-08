@@ -32,10 +32,11 @@ function collectSourceFiles(dir: string): string[] {
     const full = path.join(abs, entry.name);
     if (entry.isDirectory()) {
       if (entry.name === "__tests__" || entry.name === "node_modules") continue;
-      out.push(
-        ...collectSourceFiles(path.relative(REPO_ROOT, full))
-      );
-    } else if (/\.(ts|tsx)$/.test(entry.name) && !entry.name.endsWith(".test.ts")) {
+      out.push(...collectSourceFiles(path.relative(REPO_ROOT, full)));
+    } else if (
+      /\.(ts|tsx)$/.test(entry.name) &&
+      !entry.name.endsWith(".test.ts")
+    ) {
       out.push(full);
     }
   }
@@ -60,9 +61,30 @@ function hasDynamicTableName(source: string): boolean {
 
 describe("central table registration", () => {
   it("every lazily-created table is also created by initializeTables' module", () => {
-    const centralTables = new Set(
-      tablesCreatedIn(fs.readFileSync(CENTRAL_INIT, "utf8"))
+    const centralSource = fs.readFileSync(CENTRAL_INIT, "utf8");
+    // Additive schemas can live in a focused module, provided the central
+    // initializer imports and awaits them before reporting initialization.
+    expect(centralSource).toContain(
+      'import { ensureMobileNotificationSchema } from "./mobile-notification-schema"'
     );
+    const initialization = centralSource.slice(
+      centralSource.indexOf("async function initializeTables()")
+    );
+    expect(
+      initialization.indexOf("await ensureMobileNotificationSchema(client)")
+    ).toBeGreaterThan(-1);
+    expect(
+      initialization.indexOf("await ensureMobileNotificationSchema(client)")
+    ).toBeLessThan(initialization.indexOf("tablesInitialized = true"));
+    const centralTables = new Set([
+      ...tablesCreatedIn(centralSource),
+      ...tablesCreatedIn(
+        fs.readFileSync(
+          path.join(REPO_ROOT, "utils/db/mobile-notification-schema.ts"),
+          "utf8"
+        )
+      ),
+    ]);
     expect(centralTables.size).toBeGreaterThan(0);
 
     const offenders: string[] = [];
@@ -77,9 +99,7 @@ describe("central table registration", () => {
         }
         for (const table of tablesCreatedIn(source)) {
           if (!centralTables.has(table)) {
-            offenders.push(
-              `${table} (${path.relative(REPO_ROOT, file)})`
-            );
+            offenders.push(`${table} (${path.relative(REPO_ROOT, file)})`);
           }
         }
       }
