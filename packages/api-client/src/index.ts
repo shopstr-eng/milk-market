@@ -298,3 +298,5 @@ export function createMilkMarketApiClient(
 }
 
 export type MilkMarketApiClient = ReturnType<typeof createMilkMarketApiClient>;
+
+export * from "./notifications";

@@ -1,4 +1,5 @@
 import { Pool, PoolClient } from "pg";
+import { ensureMobileNotificationSchema } from "./mobile-notification-schema";
 import { NostrEvent } from "../types/types";
 import { findListingBySlug } from "../url-slugs";
 import { CHECKOUT_STATUSES } from "../ucp/checkout-status";
@@ -392,7 +393,7 @@ export function getDbPool(): Pool {
   return pool;
 }
 
-async function ensureTablesInitialized(): Promise<void> {
+export async function ensureTablesInitialized(): Promise<void> {
   if (tablesInitialized) {
     return;
   }
@@ -562,6 +563,10 @@ async function initializeTables(): Promise<void> {
           order_id TEXT DEFAULT NULL,
           CONSTRAINT message_events_kind_check CHECK (kind = 1059)
       );
+
+      ALTER TABLE message_events ADD COLUMN IF NOT EXISTS is_read BOOLEAN DEFAULT FALSE;
+      ALTER TABLE message_events ADD COLUMN IF NOT EXISTS order_status TEXT DEFAULT NULL;
+      ALTER TABLE message_events ADD COLUMN IF NOT EXISTS order_id TEXT DEFAULT NULL;
 
       CREATE INDEX IF NOT EXISTS idx_message_events_pubkey ON message_events(pubkey);
       CREATE INDEX IF NOT EXISTS idx_message_events_created_at ON message_events(created_at DESC);
@@ -1434,37 +1439,6 @@ async function initializeTables(): Promise<void> {
         ADD COLUMN IF NOT EXISTS auto_purchase_labels BOOLEAN NOT NULL DEFAULT TRUE;
     `);
 
-    await client.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns 
-          WHERE table_name = 'message_events' AND column_name = 'is_read'
-        ) THEN
-          ALTER TABLE message_events ADD COLUMN is_read BOOLEAN DEFAULT FALSE;
-        END IF;
-        
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns 
-          WHERE table_name = 'message_events' AND column_name = 'order_status'
-        ) THEN
-          ALTER TABLE message_events ADD COLUMN order_status TEXT DEFAULT NULL;
-        END IF;
-        
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns 
-          WHERE table_name = 'message_events' AND column_name = 'order_id'
-        ) THEN
-          ALTER TABLE message_events ADD COLUMN order_id TEXT DEFAULT NULL;
-        END IF;
-      END $$;
-    `);
-
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_message_events_is_read ON message_events(is_read);
-      CREATE INDEX IF NOT EXISTS idx_message_events_order_id ON message_events(order_id);
-    `);
-
     await ensureFailedRelayPublishesTable(client);
 
     await client.query(`
@@ -2033,6 +2007,7 @@ async function initializeTables(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_ucp_checkout_sessions_status ON ucp_checkout_sessions(status);
     `);
 
+    await ensureMobileNotificationSchema(client);
     tablesInitialized = true;
   } catch (error) {
     console.error("Failed to initialize tables:", error);

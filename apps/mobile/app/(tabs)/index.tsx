@@ -1,3 +1,4 @@
+import { NotificationSettings } from "@/components/notification-settings";
 import * as WebBrowser from "expo-web-browser";
 import { useLocalSearchParams, useRouter, type Href } from "expo-router";
 import { useEffect, useState } from "react";
@@ -262,9 +263,9 @@ export default function DashboardScreen() {
   return (
     <ScreenScrollView>
       <ScreenTitle
-        eyebrow="Vendor foundation"
+        eyebrow="Your seller workspace"
         title="Vendor dashboard"
-        description="Phase 2 focuses on secure session restore, storefront basics, Stripe status, and read-only listing visibility."
+        description="Manage your storefront, listings, orders, and shipping from one place."
       />
 
       <SellerCard
@@ -296,9 +297,11 @@ export default function DashboardScreen() {
         />
       </SellerCard>
 
+      <NotificationSettings />
+
       <SellerCard
         title={`Setup progress: ${completedCount}/${setupItems.length}`}
-        description="This is the seller-first Phase 2 checklist before product CRUD arrives."
+        description="Complete your storefront and payout setup."
       >
         {setupItems.map((item) => (
           <View key={item.label} style={styles.rowBetween}>
@@ -313,7 +316,7 @@ export default function DashboardScreen() {
 
       <SellerCard
         title="Stall summary"
-        description="Phase 2 storefront editing is intentionally limited to the fields we can safely support on mobile now."
+        description="Review your public storefront and manage your listings."
       >
         <View style={styles.metaBlock}>
           <Text style={styles.metaLabel}>Stall name</Text>
@@ -373,7 +376,7 @@ export default function DashboardScreen() {
 
       <SellerCard
         title="Stripe Connect"
-        description="Phase 2 lets the seller view current card-payment status and launch the existing onboarding flow."
+        description="Check card-payment status and complete your payout setup."
       >
         <View style={styles.rowBetween}>
           <Text style={styles.checkLabel}>Current status</Text>
