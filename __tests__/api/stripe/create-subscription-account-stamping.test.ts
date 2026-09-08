@@ -20,6 +20,12 @@ const mockSubscriptionsCreate = jest.fn();
 const mockInvoiceItemsCreate = jest.fn();
 const mockCouponsCreate = jest.fn();
 
+// Apple Pay now checks seller-owned domains. Domain registration is outside
+// these subscription persistence tests; do not open a real DB at import time.
+jest.mock("@/utils/db/custom-domains", () => ({
+  getDomainByHost: jest.fn().mockResolvedValue(null),
+}));
+
 jest.mock("stripe", () => {
   const Stripe = jest.fn().mockImplementation(() => ({
     customers: {

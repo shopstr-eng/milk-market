@@ -1,6 +1,7 @@
 import { Pool, PoolClient } from "pg";
 import { NostrEvent } from "../types/types";
 import { findListingBySlug } from "../url-slugs";
+import { CHECKOUT_STATUSES } from "../ucp/checkout-status";
 
 let pool: Pool | null = null;
 let tablesInitialized = false;
@@ -382,6 +383,10 @@ export function getDbPool(): Pool {
             tablesInitializationPromise = null;
           }
         });
+      // Pool-only callers do not await schema setup. Observe its rejection to
+      // avoid an unhandled promise, while preserving the rejected promise for
+      // ensureTablesInitialized callers so they still fail closed.
+      void tablesInitializationPromise.catch(() => undefined);
     }
   }
   return pool;
@@ -821,11 +826,67 @@ async function initializeTables(): Promise<void> {
           pubkey TEXT NOT NULL,
           d_tag TEXT NOT NULL,
           event_id TEXT NOT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          UNIQUE (pubkey, d_tag, event_id)
+          audience_source TEXT NOT NULL DEFAULT 'all',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE INDEX IF NOT EXISTS idx_blog_email_broadcasts_pubkey ON blog_email_broadcasts(pubkey);
+    `);
+
+    // Per-segment broadcast claims: pre-segment rows keyed the whole published
+    // version via UNIQUE(pubkey, d_tag, event_id). Add the segment column and
+    // replace that key with (pubkey, d_tag, event_id, audience_source) so each
+    // audience segment gets its own one-shot claim. The legacy constraint is
+    // dropped by NAME LOOKUP (not DROP ... IF EXISTS with a guessed name) so a
+    // divergent auto-generated name can't silently survive and break every
+    // segment claim as 'claim-failed'.
+    await client.query(`
+      DO $$
+      DECLARE
+        legacy_key text;
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'blog_email_broadcasts' AND column_name = 'audience_source'
+        ) THEN
+          ALTER TABLE blog_email_broadcasts
+            ADD COLUMN audience_source TEXT NOT NULL DEFAULT 'all';
+        END IF;
+
+        SELECT c.conname INTO legacy_key
+          FROM pg_constraint c
+          JOIN pg_class t ON t.oid = c.conrelid
+         WHERE t.relname = 'blog_email_broadcasts'
+           AND c.contype = 'u'
+           AND (
+             SELECT array_agg(a.attname::text ORDER BY a.attname::text)
+               FROM unnest(c.conkey) AS k(attnum)
+               JOIN pg_attribute a
+                 ON a.attrelid = t.oid AND a.attnum = k.attnum
+           ) = ARRAY['d_tag', 'event_id', 'pubkey']::text[];
+        IF legacy_key IS NOT NULL THEN
+          EXECUTE format('ALTER TABLE blog_email_broadcasts DROP CONSTRAINT %I', legacy_key);
+        END IF;
+      END $$;
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS blog_email_broadcasts_version_segment_key
+        ON blog_email_broadcasts (pubkey, d_tag, event_id, audience_source);
+
+      -- Per-recipient delivery ledger: a contact is emailed at most once per
+      -- published version ACROSS all segment sends. Claimed atomically before
+      -- each send and released if that send fails (so a retry can re-attempt).
+      -- Segment membership alone cannot dedup: a capture's source is MUTABLE
+      -- (subscription -> popup when they later claim a welcome offer), so a
+      -- membership-based exclusion would re-email them after the flip.
+      CREATE TABLE IF NOT EXISTS blog_email_broadcast_recipients (
+          pubkey TEXT NOT NULL,
+          d_tag TEXT NOT NULL,
+          event_id TEXT NOT NULL,
+          email TEXT NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (pubkey, d_tag, event_id, email)
+      );
 
       -- Subscriptions table for recurring product subscriptions
       CREATE TABLE IF NOT EXISTS subscriptions (
@@ -1006,10 +1067,11 @@ async function initializeTables(): Promise<void> {
           key_hash TEXT NOT NULL UNIQUE,
           name TEXT NOT NULL,
           pubkey TEXT NOT NULL,
-          permissions TEXT NOT NULL DEFAULT 'read' CHECK (permissions IN ('read', 'read_write')),
+          permissions TEXT NOT NULL DEFAULT 'read' CHECK (permissions IN ('read', 'read_write', 'full_access')),
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           last_used_at TIMESTAMP,
-          is_active BOOLEAN DEFAULT TRUE
+          is_active BOOLEAN DEFAULT TRUE,
+          encrypted_nsec TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_mcp_api_keys_key_hash ON mcp_api_keys(key_hash);
@@ -1026,9 +1088,10 @@ async function initializeTables(): Promise<void> {
           product_title TEXT,
           quantity INTEGER NOT NULL DEFAULT 1,
           amount_total NUMERIC(12,2) NOT NULL,
-          currency TEXT NOT NULL DEFAULT 'sats',
+          currency TEXT NOT NULL DEFAULT 'usd',
+          buyer_email TEXT,
           shipping_address JSONB,
-          payment_ref TEXT,
+          payment_intent_id TEXT,
           payment_status TEXT NOT NULL DEFAULT 'pending' CHECK (payment_status IN ('pending', 'processing', 'paid', 'failed', 'refunded')),
           order_status TEXT NOT NULL DEFAULT 'pending' CHECK (order_status IN ('pending', 'confirmed', 'shipped', 'delivered', 'cancelled')),
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1050,6 +1113,18 @@ async function initializeTables(): Promise<void> {
       );
 
       CREATE INDEX IF NOT EXISTS idx_mcp_request_proofs_created_at ON mcp_request_proofs(created_at);
+
+      -- Self-migrate deployments whose MCP tables predate the canonical
+      -- module DDL (utils/mcp/auth.ts): added columns + widened permissions
+      -- check. Whichever initializer runs first wins the CREATE, so both
+      -- copies must agree AND existing databases must be altered forward.
+      ALTER TABLE mcp_api_keys ADD COLUMN IF NOT EXISTS encrypted_nsec TEXT;
+      ALTER TABLE mcp_orders ADD COLUMN IF NOT EXISTS buyer_email TEXT;
+      ALTER TABLE mcp_orders ADD COLUMN IF NOT EXISTS payment_intent_id TEXT;
+      ALTER TABLE mcp_orders ALTER COLUMN currency SET DEFAULT 'usd';
+      ALTER TABLE mcp_api_keys DROP CONSTRAINT IF EXISTS mcp_api_keys_permissions_check;
+      ALTER TABLE mcp_api_keys ADD CONSTRAINT mcp_api_keys_permissions_check
+        CHECK (permissions IN ('read', 'read_write', 'full_access'));
 
       -- Email auth table
       CREATE TABLE IF NOT EXISTS email_auth (
@@ -1893,6 +1968,71 @@ async function initializeTables(): Promise<void> {
 
     await ensureAuthedSellersTable(client);
 
+    // Tables that also self-create lazily in their own modules. They are
+    // registered here too so a quiet dev database still contains every table
+    // prod has — otherwise the publish schema-diff reads a prod-only table as
+    // "removed" and forces a destructive rename/drop choice. The module's DDL
+    // stays the source of truth; IF NOT EXISTS makes coexistence safe, and the
+    // lazy ensure* functions keep their data migrations (they no-op on the DDL).
+    const ucpStatusList = CHECKOUT_STATUSES.map((s) => `'${s}'`).join(",");
+    await client.query(`
+      -- Stripe webhook event dedup claims (utils/stripe/processed-events.ts)
+      CREATE TABLE IF NOT EXISTS stripe_processed_events (
+        event_id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        processed_at BIGINT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'processing',
+        claimed_at BIGINT
+      );
+      ALTER TABLE stripe_processed_events
+        ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'processing';
+      ALTER TABLE stripe_processed_events
+        ADD COLUMN IF NOT EXISTS claimed_at BIGINT;
+      CREATE INDEX IF NOT EXISTS idx_stripe_processed_events_processed_at
+        ON stripe_processed_events(processed_at);
+
+      -- Stripe payment-intent lifecycle (utils/stripe/pending-payments.ts)
+      CREATE TABLE IF NOT EXISTS stripe_pending_payments (
+        intent_ref TEXT PRIMARY KEY,
+        payment_intent_id TEXT,
+        amount BIGINT NOT NULL,
+        currency TEXT NOT NULL,
+        status TEXT NOT NULL,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        last_error_message TEXT,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_stripe_pending_payments_status
+        ON stripe_pending_payments(status);
+      CREATE INDEX IF NOT EXISTS idx_stripe_pending_payments_payment_intent_id
+        ON stripe_pending_payments(payment_intent_id);
+
+      -- UCP checkout sessions (utils/ucp/checkout-store.ts)
+      CREATE TABLE IF NOT EXISTS ucp_checkout_sessions (
+        id TEXT PRIMARY KEY,
+        api_key_id INTEGER REFERENCES mcp_api_keys(id),
+        buyer_pubkey TEXT NOT NULL,
+        seller_pubkey TEXT NOT NULL,
+        product_id TEXT NOT NULL,
+        mcp_order_id TEXT UNIQUE,
+        status TEXT NOT NULL DEFAULT 'incomplete' CHECK (status IN (${ucpStatusList})),
+        payment_method TEXT NOT NULL,
+        amount_total NUMERIC(12,2) NOT NULL DEFAULT 0,
+        currency TEXT NOT NULL DEFAULT 'usd',
+        request JSONB,
+        quote JSONB,
+        payment JSONB,
+        messages JSONB NOT NULL DEFAULT '[]'::jsonb,
+        error TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_ucp_checkout_sessions_buyer ON ucp_checkout_sessions(buyer_pubkey);
+      CREATE INDEX IF NOT EXISTS idx_ucp_checkout_sessions_order ON ucp_checkout_sessions(mcp_order_id);
+      CREATE INDEX IF NOT EXISTS idx_ucp_checkout_sessions_status ON ucp_checkout_sessions(status);
+    `);
+
     tablesInitialized = true;
   } catch (error) {
     console.error("Failed to initialize tables:", error);
@@ -2708,7 +2848,10 @@ export async function fetchProductsByPubkeyFromDb(
       sig: row.sig,
     }));
   } catch (error) {
-    logSwallowedDbOutage("Failed to fetch products by pubkey from database:", error);
+    logSwallowedDbOutage(
+      "Failed to fetch products by pubkey from database:",
+      error
+    );
     return [];
   } finally {
     if (client) {
@@ -2875,7 +3018,10 @@ export async function fetchStorefrontBlogPostEventsForSitemap(
       },
     }));
   } catch (error) {
-    logSwallowedDbOutage("Failed to fetch storefront blog posts for sitemap:", error);
+    logSwallowedDbOutage(
+      "Failed to fetch storefront blog posts for sitemap:",
+      error
+    );
     return [];
   } finally {
     if (client) client.release();
@@ -2917,7 +3063,10 @@ export async function fetchBlogPostByDTagAndPubkey(
       sig: row.sig,
     };
   } catch (error) {
-    logSwallowedDbOutage("Failed to fetch blog post by d-tag and pubkey:", error);
+    logSwallowedDbOutage(
+      "Failed to fetch blog post by d-tag and pubkey:",
+      error
+    );
     return null;
   } finally {
     if (client) client.release();
@@ -3166,7 +3315,10 @@ export async function fetchCommunityByPubkeyAndIdentifier(
       sig: row.sig,
     };
   } catch (error) {
-    logSwallowedDbOutage("Failed to fetch community by pubkey and identifier:", error);
+    logSwallowedDbOutage(
+      "Failed to fetch community by pubkey and identifier:",
+      error
+    );
     return null;
   } finally {
     if (client) client.release();
@@ -3313,7 +3465,10 @@ export async function fetchRelevantReportsFromDb(
       sig: row.sig,
     }));
   } catch (error) {
-    logSwallowedDbOutage("Failed to fetch relevant reports from database:", error);
+    logSwallowedDbOutage(
+      "Failed to fetch relevant reports from database:",
+      error
+    );
     return [];
   } finally {
     if (client) client.release();
@@ -3894,7 +4049,10 @@ export async function fetchCommunityPostsFromDb(
       sig: row.sig,
     }));
   } catch (error) {
-    logSwallowedDbOutage("Failed to fetch community posts from database:", error);
+    logSwallowedDbOutage(
+      "Failed to fetch community posts from database:",
+      error
+    );
     return [];
   } finally {
     if (client) client.release();
@@ -3929,7 +4087,10 @@ export async function fetchCommunityApprovalsFromDb(
       sig: row.sig,
     }));
   } catch (error) {
-    logSwallowedDbOutage("Failed to fetch community approvals from database:", error);
+    logSwallowedDbOutage(
+      "Failed to fetch community approvals from database:",
+      error
+    );
     return [];
   } finally {
     if (client) client.release();
@@ -4431,18 +4592,22 @@ export async function isSellerEmailUnsubscribed(
 export async function claimBlogBroadcast(
   pubkey: string,
   dTag: string,
-  eventId: string
+  eventId: string,
+  audienceSource?: SellerAudienceSource
 ): Promise<boolean | null> {
   const dbPool = getDbPool();
   let client;
   try {
     client = await dbPool.connect();
+    // One claim per (published version, audience segment): a post can be
+    // emailed once to popup contacts, once to subscription contacts, and once
+    // to the full audience ('all' — the default on pre-segment rows).
     const result = await client.query(
-      `INSERT INTO blog_email_broadcasts (pubkey, d_tag, event_id)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (pubkey, d_tag, event_id) DO NOTHING
+      `INSERT INTO blog_email_broadcasts (pubkey, d_tag, event_id, audience_source)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (pubkey, d_tag, event_id, audience_source) DO NOTHING
        RETURNING id`,
-      [pubkey, dTag, eventId]
+      [pubkey, dTag, eventId, audienceSource ?? "all"]
     );
     return (result.rowCount ?? 0) > 0;
   } catch (error) {
@@ -4461,7 +4626,8 @@ export async function claimBlogBroadcast(
 export async function releaseBlogBroadcast(
   pubkey: string,
   dTag: string,
-  eventId: string
+  eventId: string,
+  audienceSource?: SellerAudienceSource
 ): Promise<void> {
   const dbPool = getDbPool();
   let client;
@@ -4469,11 +4635,132 @@ export async function releaseBlogBroadcast(
     client = await dbPool.connect();
     await client.query(
       `DELETE FROM blog_email_broadcasts
-        WHERE pubkey = $1 AND d_tag = $2 AND event_id = $3`,
-      [pubkey, dTag, eventId]
+        WHERE pubkey = $1 AND d_tag = $2 AND event_id = $3
+          AND audience_source = $4`,
+      [pubkey, dTag, eventId, audienceSource ?? "all"]
     );
   } catch (error) {
     console.error("Failed to release blog broadcast claim:", error);
+  } finally {
+    if (client) client.release();
+  }
+}
+
+/**
+ * Which audience segments already hold a broadcast claim for this published
+ * version ('all' and/or 'popup'/'subscription'). Drives cross-segment dedup:
+ * a full-audience send subtracts already-emailed segments, and a segment send
+ * after a full send has nobody new to reach. null on DB error (fail closed,
+ * same as a failed claim).
+ */
+export async function getBlogBroadcastSegments(
+  pubkey: string,
+  dTag: string,
+  eventId: string
+): Promise<string[] | null> {
+  const dbPool = getDbPool();
+  let client;
+  try {
+    client = await dbPool.connect();
+    const result = await client.query(
+      `SELECT audience_source FROM blog_email_broadcasts
+        WHERE pubkey = $1 AND d_tag = $2 AND event_id = $3`,
+      [pubkey, dTag, eventId]
+    );
+    return result.rows.map((row) => row.audience_source as string);
+  } catch (error) {
+    logSwallowedDbOutage("Failed to read blog broadcast segments:", error);
+    return null;
+  } finally {
+    if (client) client.release();
+  }
+}
+
+/**
+ * Emails already claimed for delivery of this published version, across ALL
+ * segment sends. A full-audience send subtracts exactly this set — current
+ * segment membership is NOT a safe substitute because a capture's source is
+ * mutable (subscription -> popup on a later welcome-offer claim), which would
+ * let a membership-based exclusion re-email the contact after the flip.
+ * null on DB error (fail closed, same as a failed claim).
+ */
+export async function getBlogBroadcastRecipients(
+  pubkey: string,
+  dTag: string,
+  eventId: string
+): Promise<string[] | null> {
+  const dbPool = getDbPool();
+  let client;
+  try {
+    client = await dbPool.connect();
+    const result = await client.query(
+      `SELECT email FROM blog_email_broadcast_recipients
+        WHERE pubkey = $1 AND d_tag = $2 AND event_id = $3`,
+      [pubkey, dTag, eventId]
+    );
+    return result.rows.map((row) => row.email as string);
+  } catch (error) {
+    logSwallowedDbOutage("Failed to read blog broadcast recipients:", error);
+    return null;
+  } finally {
+    if (client) client.release();
+  }
+}
+
+/**
+ * Atomically claim delivery of one published version to one recipient. true =
+ * this send owns the delivery and must email them; false = another send
+ * (any segment, or a concurrent one) already claimed/delivered — skip. This
+ * per-recipient claim is what makes concurrent full + segment sends safe.
+ * null on DB error (treated as a send failure, never a silent skip).
+ */
+export async function claimBlogBroadcastRecipient(
+  pubkey: string,
+  dTag: string,
+  eventId: string,
+  email: string
+): Promise<boolean | null> {
+  const dbPool = getDbPool();
+  let client;
+  try {
+    client = await dbPool.connect();
+    const result = await client.query(
+      `INSERT INTO blog_email_broadcast_recipients (pubkey, d_tag, event_id, email)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (pubkey, d_tag, event_id, email) DO NOTHING
+       RETURNING email`,
+      [pubkey, dTag, eventId, email]
+    );
+    return (result.rowCount ?? 0) > 0;
+  } catch (error) {
+    logSwallowedDbOutage("Failed to claim blog broadcast recipient:", error);
+    return null;
+  } finally {
+    if (client) client.release();
+  }
+}
+
+/**
+ * Release a recipient claim after that recipient's send FAILED, so a retry
+ * can re-attempt delivery. Only safe for a recipient that was not emailed.
+ */
+export async function releaseBlogBroadcastRecipient(
+  pubkey: string,
+  dTag: string,
+  eventId: string,
+  email: string
+): Promise<void> {
+  const dbPool = getDbPool();
+  let client;
+  try {
+    client = await dbPool.connect();
+    await client.query(
+      `DELETE FROM blog_email_broadcast_recipients
+        WHERE pubkey = $1 AND d_tag = $2 AND event_id = $3 AND email = $4`,
+      [pubkey, dTag, eventId, email]
+    );
+  } catch (error) {
+    console.error("Failed to release blog broadcast recipient:", error);
   } finally {
     if (client) client.release();
   }

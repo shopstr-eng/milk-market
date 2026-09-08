@@ -9,9 +9,65 @@ import {
 import { verifyEvent } from "nostr-tools";
 
 const mockPublish = jest.fn();
+const mockClose = jest.fn();
 
-jest.mock("@/utils/nostr/contained-relay", () => ({
-  publishEventToRelay: (...args: unknown[]) => mockPublish(...args),
+jest.mock("nostr-tools/pool", () => ({
+  useWebSocketImplementation: jest.fn(),
+  SimplePool: jest.fn(() => ({ publish: mockPublish, close: mockClose })),
+}));
+
+// Minimal fake relay socket for contained-relay.ts (publishToRelays now uses
+// per-relay contained sockets, not SimplePool): records its URL, opens once
+// its "open" handler attaches, and ACKs every EVENT frame with OK — false when
+// mockWsFailAll is set. The old empty-class mock died with "ws.on is not a
+// function".
+const mockWsInstances: { url: string; sent: string[] }[] = [];
+let mockWsFailAll = false;
+
+jest.mock("ws", () => ({
+  __esModule: true,
+  default: class FakeRelaySocket {
+    url: string;
+    sent: string[] = [];
+    private handlers = new Map<string, ((...args: any[]) => void)[]>();
+    constructor(url: string) {
+      this.url = url;
+      mockWsInstances.push(this);
+    }
+    on(event: string, handler: (...args: any[]) => void) {
+      this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);
+      // Fire "open" only after a handler exists (construction precedes
+      // handler attachment in publishEventToRelay/queryRelayEvents).
+      if (event === "open")
+        void Promise.resolve().then(() => this.emit("open"));
+      return this;
+    }
+    private emit(event: string, ...args: any[]) {
+      for (const h of this.handlers.get(event) ?? []) h(...args);
+    }
+    send(data: string) {
+      this.sent.push(data);
+      try {
+        const msg = JSON.parse(data);
+        if (msg[0] === "EVENT" && msg[1]?.id) {
+          const ok = !mockWsFailAll;
+          void Promise.resolve().then(() =>
+            this.emit(
+              "message",
+              Buffer.from(JSON.stringify(["OK", msg[1].id, ok]))
+            )
+          );
+        } else if (msg[0] === "REQ") {
+          void Promise.resolve().then(() =>
+            this.emit("message", Buffer.from(JSON.stringify(["EOSE", msg[1]])))
+          );
+        }
+      } catch {
+        /* ignore malformed frames */
+      }
+    }
+    close() {}
+  },
 }));
 
 jest.mock("nostr-tools", () => ({
@@ -82,13 +138,17 @@ const queryMock = jest.fn();
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockWsInstances.length = 0;
+  mockWsFailAll = false;
+  // publishToRelays arms a 21s fallback timeout that loses the race to the
+  // resolved publish promise; fake timers keep it from leaking as an open handle.
+  jest.useFakeTimers();
   mocked.verifyEvent.mockReturnValue(true);
   mocked.fetchRelayConfigFromDb.mockResolvedValue(relayListEvents());
   mocked.cacheEvent.mockResolvedValue(undefined);
   queryMock.mockResolvedValue({ rows: [] });
   mocked.getDbPool.mockReturnValue({ query: queryMock });
-  // Default: every relay accepts the event.
-  mockPublish.mockResolvedValue(true);
+  // Default: every relay accepts the event (FakeRelaySocket ACKs OK=true).
 });
 
 describe("republishBlogPostToAuthorRelays", () => {
@@ -99,7 +159,7 @@ describe("republishBlogPostToAuthorRelays", () => {
     expect(result).toEqual({ published: 0, relays: [] });
     expect(mocked.verifyEvent).not.toHaveBeenCalled();
     expect(mocked.cacheEvent).not.toHaveBeenCalled();
-    expect(mockPublish).not.toHaveBeenCalled();
+    expect(mockWsInstances).toHaveLength(0);
   });
 
   test("rejects an event that fails signature verification", async () => {
@@ -107,7 +167,7 @@ describe("republishBlogPostToAuthorRelays", () => {
     const result = await republishBlogPostToAuthorRelays(blogEvent());
     expect(result).toEqual({ published: 0, relays: [] });
     expect(mocked.cacheEvent).not.toHaveBeenCalled();
-    expect(mockPublish).not.toHaveBeenCalled();
+    expect(mockWsInstances).toHaveLength(0);
   });
 
   test("resolves NIP-65 write relays + defaults + BLASTR, caches, and publishes", async () => {
@@ -117,7 +177,7 @@ describe("republishBlogPostToAuthorRelays", () => {
     // Cached before broadcast so the post is readable even if relays time out.
     expect(mocked.cacheEvent).toHaveBeenCalledWith(event);
 
-    const relaysPublishedTo = mockPublish.mock.calls.map(([url]) => url);
+    const relaysPublishedTo = mockWsInstances.map((i) => i.url);
     // Author's own write relays (unmarked + write-only) are included.
     expect(relaysPublishedTo).toContain("wss://author.example");
     expect(relaysPublishedTo).toContain("wss://write.example");
@@ -140,7 +200,7 @@ describe("republishBlogPostToAuthorRelays", () => {
   test("still publishes to defaults + BLASTR when the relay list can't be resolved", async () => {
     mocked.fetchRelayConfigFromDb.mockRejectedValue(new Error("db down"));
     const result = await republishBlogPostToAuthorRelays(blogEvent());
-    const relaysPublishedTo = mockPublish.mock.calls.map(([url]) => url);
+    const relaysPublishedTo = mockWsInstances.map((i) => i.url);
     for (const def of DEFAULT_RELAYS) {
       expect(relaysPublishedTo).toContain(def);
     }
@@ -149,7 +209,7 @@ describe("republishBlogPostToAuthorRelays", () => {
   });
 
   test("tracks a failed relay publish when every relay rejects", async () => {
-    mockPublish.mockResolvedValue(false);
+    mockWsFailAll = true; // every relay ACKs OK=false
     const event = blogEvent();
     const result = await republishBlogPostToAuthorRelays(event);
 

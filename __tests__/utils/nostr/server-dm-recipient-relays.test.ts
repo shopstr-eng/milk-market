@@ -16,19 +16,62 @@ import {
 } from "@/utils/db/db-service";
 
 const mockPublish = jest.fn();
+const mockClose = jest.fn();
 
-jest.mock("@/utils/nostr/contained-relay", () => ({
-  publishEventToRelay: (...args: unknown[]) => mockPublish(...args),
+jest.mock("nostr-tools/pool", () => ({
+  useWebSocketImplementation: jest.fn(),
+  SimplePool: jest.fn(() => ({ publish: mockPublish, close: mockClose })),
 }));
 
-jest.mock("@/utils/nostr/nip65-indexer-fetch", () => ({
-  fetchKind10002FromIndexers: jest.fn(async () => null),
-}));
+// Minimal fake relay socket for contained-relay.ts (publishToRelays now uses
+// per-relay contained sockets, not SimplePool): records its URL, opens once
+// its "open" handler attaches, and ACKs every EVENT frame with OK. The old
+// empty-class mock died with "ws.on is not a function".
+const mockWsInstances: { url: string; sent: string[] }[] = [];
 
-// DNS safety has dedicated coverage; these routing fixtures use reserved
-// .example hostnames and must not depend on a real resolver.
-jest.mock("@/utils/url-safety", () => ({
-  isSafePublicHostname: jest.fn(async () => true),
+jest.mock("ws", () => ({
+  __esModule: true,
+  default: class FakeRelaySocket {
+    url: string;
+    sent: string[] = [];
+    private handlers = new Map<string, ((...args: any[]) => void)[]>();
+    constructor(url: string) {
+      this.url = url;
+      mockWsInstances.push(this);
+    }
+    on(event: string, handler: (...args: any[]) => void) {
+      this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);
+      // Fire "open" only after a handler exists (construction precedes
+      // handler attachment in publishEventToRelay/queryRelayEvents).
+      if (event === "open")
+        void Promise.resolve().then(() => this.emit("open"));
+      return this;
+    }
+    private emit(event: string, ...args: any[]) {
+      for (const h of this.handlers.get(event) ?? []) h(...args);
+    }
+    send(data: string) {
+      this.sent.push(data);
+      try {
+        const msg = JSON.parse(data);
+        if (msg[0] === "EVENT" && msg[1]?.id) {
+          void Promise.resolve().then(() =>
+            this.emit(
+              "message",
+              Buffer.from(JSON.stringify(["OK", msg[1].id, true]))
+            )
+          );
+        } else if (msg[0] === "REQ") {
+          void Promise.resolve().then(() =>
+            this.emit("message", Buffer.from(JSON.stringify(["EOSE", msg[1]])))
+          );
+        }
+      } catch {
+        /* ignore malformed frames */
+      }
+    }
+    close() {}
+  },
 }));
 
 jest.mock("nostr-tools", () => ({
@@ -56,6 +99,14 @@ jest.mock("@/utils/db/db-service", () => ({
   fetchRelayConfigFromDb: jest.fn(),
 }));
 
+// The recipient-relay path DNS-checks every candidate (fail-closed), which
+// would drop these fake hostnames; stub the classifier public-safe. The fake
+// ws socket never invokes the lookup, so a bare jest.fn() suffices there.
+jest.mock("@/utils/url-safety", () => ({
+  isSafePublicHostname: jest.fn(async () => true),
+  createPublicOnlyLookup: jest.fn(() => jest.fn()),
+}));
+
 const mocked = {
   cacheEvent: cacheEvent as jest.Mock,
   getDbPool: getDbPool as jest.Mock,
@@ -78,6 +129,9 @@ const queryMock = jest.fn();
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.ENCRYPTION_NSEC = "nsec1test";
+  // publishToRelays arms a 21s fallback timeout that loses the race to the
+  // resolved publish promise; fake timers keep it from leaking as an open handle.
+  jest.useFakeTimers();
   mocked.fetchRelayConfigFromDb.mockResolvedValue([
     {
       kind: 10002,
@@ -91,10 +145,12 @@ beforeEach(() => {
   mocked.cacheEvent.mockResolvedValue(undefined);
   queryMock.mockResolvedValue({ rows: [] });
   mocked.getDbPool.mockReturnValue({ query: queryMock });
-  mockPublish.mockResolvedValue(true);
+  mockWsInstances.length = 0;
+  // Default: every relay accepts the event (FakeRelaySocket ACKs OK=true).
 });
 
 afterEach(() => {
+  jest.useRealTimers();
   delete process.env.ENCRYPTION_NSEC;
 });
 
@@ -108,7 +164,7 @@ describe("sendServerSideNostrDMToRecipientRelays", () => {
 
     expect(result).toBe(true);
     expect(mocked.cacheEvent).toHaveBeenCalledTimes(1);
-    const relaysPublishedTo = mockPublish.mock.calls.map(([url]) => url);
+    const relaysPublishedTo = mockWsInstances.map((i) => i.url);
     // Read relays: unmarked (read+write) and read-only are both read targets.
     expect(relaysPublishedTo).toContain("wss://payee.example");
     expect(relaysPublishedTo).toContain("wss://payee-read.example");
@@ -131,7 +187,7 @@ describe("sendServerSideNostrDMToRecipientRelays", () => {
     );
 
     expect(result).toBe(true);
-    const relaysPublishedTo = mockPublish.mock.calls.map(([url]) => url);
+    const relaysPublishedTo = mockWsInstances.map((i) => i.url);
     for (const def of DEFAULT_RELAYS) {
       expect(relaysPublishedTo).toContain(def);
     }
@@ -149,7 +205,7 @@ describe("sendServerSideNostrDMToRecipientRelays", () => {
     );
 
     expect(result).toBe(false);
-    expect(mockPublish).not.toHaveBeenCalled();
+    expect(mockWsInstances).toHaveLength(0);
     warnSpy.mockRestore();
   });
 });
@@ -160,6 +216,6 @@ describe("sendServerSideNostrDM (unchanged default-relay behavior)", () => {
 
     expect(result).toBe(true);
     expect(mocked.fetchRelayConfigFromDb).not.toHaveBeenCalled();
-    expect(mockPublish.mock.calls.map(([url]) => url)).toEqual(DEFAULT_RELAYS);
+    expect(mockWsInstances.map((i) => i.url)).toEqual(DEFAULT_RELAYS);
   });
 });

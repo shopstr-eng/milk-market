@@ -1,6 +1,11 @@
 import { ShippingOptionsType } from "@/utils/STATIC-VARIABLES";
 import { calculateTotalCost } from "@/components/utility-components/display-monetary-info";
-import { parseShippingTag } from "@/utils/parsers/product-tag-helpers";
+import {
+  parseShippingTag,
+  parseShippingOptionRefTag,
+} from "@/utils/parsers/product-tag-helpers";
+import { ShippingOptionRef } from "@/utils/parsers/shipping-option-parser";
+import { ISO_COUNTRY_CODES } from "@/utils/geo/countries";
 import { normalizeProductImageUrl } from "@/utils/images";
 import { NostrEvent, StorefrontProductPageConfig } from "@/utils/types/types";
 
@@ -72,6 +77,10 @@ export type ProductData = {
   packageWidthIn?: number;
   packageHeightIn?: number;
   handlingTimeDays?: number;
+  /** Seller's explicit ship-to countries (ISO 3166-1 alpha-2, sorted). */
+  shipsTo?: string[];
+  /** Kind-30406 shipping-option references (spec: "shipping_option" tags). */
+  shippingOptions?: ShippingOptionRef[];
   rawEvent?: NostrEvent;
 };
 
@@ -136,6 +145,23 @@ export const parseTags = (productEvent: NostrEvent) => {
           parsedData.shippingCurrency = parsedShipping.shippingCurrency;
         }
         break;
+      case "shipping_option": {
+        // ["shipping_option", "30406:<pubkey>:<d>", extraCost?] — spec
+        // reference to a kind-30406 shipping option. May appear multiple
+        // times; malformed refs are ignored.
+        const parsedRef = parseShippingOptionRefTag(tag);
+        if (parsedRef) {
+          if (!parsedData.shippingOptions) parsedData.shippingOptions = [];
+          if (
+            !parsedData.shippingOptions.some(
+              (r) => r.reference === parsedRef.reference
+            )
+          ) {
+            parsedData.shippingOptions.push(parsedRef);
+          }
+        }
+        break;
+      }
       case "d":
         parsedData.d = values[0];
         break;
@@ -323,6 +349,17 @@ export const parseTags = (productEvent: NostrEvent) => {
         const hd = values[0] ? Number(values[0]) : NaN;
         if (Number.isFinite(hd) && hd >= 0) {
           parsedData.handlingTimeDays = Math.floor(hd);
+        }
+        break;
+      }
+      case "ships_to": {
+        // Repeated ["ships_to", ISO] tags — the seller's explicit ship-to
+        // countries. Unknown codes are dropped (never fabricated into).
+        const code = values[0]?.trim().toUpperCase();
+        if (code && ISO_COUNTRY_CODES.has(code)) {
+          parsedData.shipsTo = [
+            ...new Set([...(parsedData.shipsTo ?? []), code]),
+          ].sort();
         }
         break;
       }

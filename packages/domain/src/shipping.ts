@@ -40,7 +40,10 @@ function isSafePart(value: string): boolean {
 
 function normalizeUsCountry(value: string): string | null {
   const country = value.trim().toUpperCase();
-  return country === "US" || country === "USA" || country === "UNITED STATES"
+  return country === "US" ||
+    country === "USA" ||
+    country === "UNITED STATES" ||
+    country === "UNITED STATES OF AMERICA"
     ? "US"
     : null;
 }

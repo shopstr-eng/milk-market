@@ -105,6 +105,14 @@ export function resolveMultiCardOrderId(
   return existing || generate();
 }
 
+// Buyer-facing failure text when configuring the NEXT seller's card form
+// throws after one or more sellers were already charged. The paid sellers'
+// results were recorded before advancing, so a resubmit resumes from the
+// remaining unpaid sellers only — the message must say exactly that.
+export function multiCardAdvanceFailureMessage(detail: string): string {
+  return `Your previous sellers were paid, but setting up the next seller's card form failed: ${detail}. Please retry to finish the remaining sellers.`;
+}
+
 // The final step finalizes the whole order (and an all-already-paid resubmit,
 // where the queue is empty, finalizes immediately).
 export function isFinalMultiCardStep(
@@ -150,7 +158,13 @@ export function computeSellerCardCharge(params: {
       0
     );
     const shipping = nativeShippingPerSeller[pubkey] || 0;
-    const amount = Math.ceil((items + shipping) * 100) / 100;
+    // Float-safe ceil: 0.10 + 0.20 = 0.30000000000000004 in IEEE-754, and a
+    // naive Math.ceil(x * 100) would bill that exact 30-cent total as 31
+    // cents — an overcharge. The epsilon (1e-7 of a cent) sits far above
+    // double-precision noise at any realistic total and far below a genuine
+    // sub-cent fraction (13.001 must still round UP — never under-collect).
+    const cents = (items + shipping) * 100;
+    const amount = cents === 0 ? 0 : Math.ceil(cents - 1e-7) / 100;
     return { amount, currency: (cartCurrency as string).toUpperCase() };
   }
 

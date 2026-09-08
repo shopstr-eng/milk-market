@@ -6,6 +6,23 @@ import {
 } from "../index";
 
 describe("seller shipping helpers", () => {
+  test("parses the US country name emitted by web checkout", () => {
+    expect(
+      parseSellerOrderAddress(
+        "Ada Lovelace, 12 Market St, Apt 4, Austin, TX, 78701, United States of America"
+      )
+    ).toMatchObject({ street2: "Apt 4", country: "US" });
+    expect(
+      normalizeSellerShippingAddress({
+        street1: "12 Market St",
+        city: "Austin",
+        state: "TX",
+        postalCode: "78701",
+        country: " United States of America ",
+      })
+    ).toMatchObject({ country: "US" });
+  });
+
   test("parses the six-part order address used by checkout", () => {
     expect(
       parseSellerOrderAddress(

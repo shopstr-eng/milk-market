@@ -195,6 +195,24 @@ test("mobile label history requires NIP-98 and filters in the database", async (
 });
 
 describe("mobile order label quote", () => {
+  test("normalizes the country name from web checkout before quoting", async () => {
+    const res = response();
+    await ratesHandler(
+      request({
+        ...quoteBody,
+        to: { ...quoteBody.to, country: "United States of America" },
+      }),
+      res as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(getRatesMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        to: expect.objectContaining({ country: "US" }),
+      })
+    );
+  });
+
   test("binds the signed seller, confirmed order, and quoted shipment", async () => {
     const req = request(quoteBody);
     req.url = "/api/shipping/rates";

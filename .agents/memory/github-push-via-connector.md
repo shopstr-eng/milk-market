@@ -63,6 +63,32 @@ upstream/main` (a parity merge makes all of upstream's history appear in the
   required_conversation_resolution, etc. — verify with a final GET).
 - If the connector 401s "Bad credentials" while status says healthy, the token
   is expired/revoked: use the reauthorize flow once.
+- GitHub's git-data endpoints answer a bare 404 "Not Found" (NOT a 403) when
+  a `createTree` includes a `.github/workflows/**` path but the token lacks
+  the `workflow` OAuth scope — while the same tree minus the workflow file
+  succeeds. Diagnose by retrying with the non-workflow files only; do not
+  trust the Contents API as a probe (Cloudflare 403s it with an HTML page).
+  Recovery: split the commit, push non-workflow files via the API, keep the
+  workflow commit local until the connection is reauthorized with the
+  workflow scope (reauthorization can only be OFFERED once per connection —
+  check whether a card is already outstanding before planning around it).
+- As of 2026-09, `.github/workflows/` EXISTS on origin/main — the CI commit is
+  no longer local-only (a cherry-pick of it comes back empty). Verify with
+  `git ls-tree origin/main .github/workflows` before re-planting anything.
+- To push past a LOCAL-ONLY unpushable commit sitting beneath yours (e.g. a
+  kept-local `.github/workflows` change): don't push local HEAD — build the
+  API commit with `base_tree` = origin/main's tree and only the pushable
+  files, then `git fetch && git reset --hard origin/main && git cherry-pick
+<localSha>` to re-plant the local-only commit on top (cherry-pick has no
+  `-q` flag).
+- Connector call signatures (verified): `listConnections("github")` REQUIRES
+  the connector-name string arg (bare call throws), and must run inside
+  `"use impure"`; `conn.proxyFetch(path, { method, body })` takes the API
+  path FIRST (a `{url: "https://api.github.com/..."}` option object throws
+  "requires an upstream API path starting with /"). The proxy targets
+  api.github.com. Repo paths 404 "Not Found" under the wrong owner — the
+  milk-market repo is the `shopstr-eng` ORG (`/repos/shopstr-eng/milk-market`),
+  while the token's `/user` login is `calvadev`.
 - Task-agent/platform merge commits arrive authored as
   `Replit Agent <agent@replit.com>` or `<user>@users.noreply.replit.com`.
   Reauthor unpushed commits to the user's GitHub identity with

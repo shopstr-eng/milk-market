@@ -9,11 +9,20 @@ import {
   EXCHANGE_RATE_ERROR_CODE,
 } from "@/utils/stripe/currency";
 import { getSelfHostConfig, isSelfHostTenant } from "@/utils/self-host/config";
+import {
+  registerApplePayDomain,
+  trustedRegistrationHost,
+} from "@/utils/stripe/apple-pay";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", {
   apiVersion: "2025-09-30.clover",
 });
 
+// Apple Pay domain registration is a privileged Connect-scoped call, so the
+// registrable domain must be trustworthy: the canonical platform host, or a
+// verified custom domain owned by the seller being charged. Anything else
+// (spoofed Host headers, other sellers' domains) skips registration — the
+// Host header alone is never trusted.
 interface SellerSplit {
   sellerPubkey: string;
   // Preferred: per-seller subtotal already in seller-currency smallest units
@@ -360,6 +369,11 @@ export default async function handler(
       } catch (e) {
         console.warn("recordPendingPayment failed:", e);
       }
+      // Multi-seller charges run on the platform account: register the
+      // canonical platform host for Apple Pay there before the buyer's wallet
+      // element initializes (never request-controlled hosts).
+      const platformRegHost = await trustedRegistrationHost(req.headers?.host);
+      if (platformRegHost) await registerApplePayDomain(platformRegHost);
       const paymentIntent = await withStripeRetry(() =>
         stripe.paymentIntents.create(paymentIntentParams, {
           idempotencyKey: intentRefMM,
@@ -474,6 +488,17 @@ export default async function handler(
     } catch (e) {
       console.warn("recordPendingPayment failed:", e);
     }
+    // Direct charge: Apple Pay domain registration must happen on the
+    // connected account that owns this PaymentIntent (or the platform account
+    // when unconnected), and only for the platform host or a verified custom
+    // domain owned by THIS seller. Awaited so wallet eligibility is computed
+    // after registration; cached per account+domain and fail-open.
+    const sellerRegHost = await trustedRegistrationHost(
+      req.headers?.host,
+      sellerPubkey
+    );
+    if (sellerRegHost)
+      await registerApplePayDomain(sellerRegHost, connectedAccountId);
     const paymentIntent = await withStripeRetry(() =>
       stripe.paymentIntents.create(paymentIntentParams, {
         ...(stripeOptions ?? {}),

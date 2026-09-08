@@ -7,6 +7,7 @@ import {
   Fragment,
   type ReactNode,
 } from "react";
+import { trackEvent } from "@/utils/analytics";
 import {
   orderedPaymentMethodGroups,
   type StorefrontPaymentMethodGroup,
@@ -104,6 +105,7 @@ import {
   resolveMultiCardOrderId,
   computeSellerCardCharge,
   runMultiCardStepAdvance,
+  multiCardAdvanceFailureMessage,
 } from "@/utils/cart/multi-seller-card";
 import { NostrWebLNProvider } from "@getalby/sdk";
 import { createSellerActionAuthEventTemplate } from "@milk-market/nostr";
@@ -447,6 +449,23 @@ export default function CartInvoiceCard({
     string | null
   >(null);
   const [stripePaymentConfirmed, setStripePaymentConfirmed] = useState(false);
+  // Analytics: remember which payment method this card instance started
+  // checkout with, so the completion effect can attribute it exactly once.
+  const orderAnalyticsRef = useRef<{ method: string | null; fired: boolean }>({
+    method: null,
+    fired: false,
+  });
+
+  useEffect(() => {
+    if (!paymentConfirmed && !stripePaymentConfirmed) return;
+    const analytics = orderAnalyticsRef.current;
+    if (!analytics.method || analytics.fired) return;
+    analytics.fired = true;
+    trackEvent("order_completed", {
+      method: analytics.method,
+      surface: "cart",
+    });
+  }, [paymentConfirmed, stripePaymentConfirmed]);
   const STRIPE_TIMEOUT_SECONDS = 600;
   const [_stripeTimeoutSeconds, setStripeTimeoutSeconds] = useState<number>(
     STRIPE_TIMEOUT_SECONDS
@@ -2774,6 +2793,12 @@ export default function CartInvoiceCard({
         }
       );
 
+      orderAnalyticsRef.current.method = paymentType || "lightning";
+      trackEvent("checkout_started", {
+        method: paymentType || "lightning",
+        surface: "cart",
+      });
+
       if (paymentType === "cashu") {
         await handleCashuPayment(price, paymentData);
       } else if (paymentType === "nwc") {
@@ -3731,9 +3756,7 @@ export default function CartInvoiceCard({
       onAdvanceError: (error) => {
         console.error("Failed to set up next seller's card form:", error);
         const detail = error instanceof Error ? error.message : "Unknown error";
-        setFailureText(
-          `Your previous sellers were paid, but setting up the next seller's card form failed: ${detail}. Please retry to finish the remaining sellers.`
-        );
+        setFailureText(multiCardAdvanceFailureMessage(detail));
         setShowFailureModal(true);
       },
       finalizeOrder: async () => {

@@ -110,6 +110,13 @@ const MOBILE_EDITABLE_TAGS = new Set([
   "published_at",
 ]);
 
+export function hasSellerListingShippingOptions(
+  draft: SellerListingDraft
+): boolean {
+  // Preserve even unresolved refs: a relay outage must not change fulfillment.
+  return draft.sourceTags?.some((tag) => tag[0] === "shipping_option") ?? false;
+}
+
 function getTagValues(event: NostrEventRecord, key: string): string[] {
   return event.tags
     .filter((tag) => tag[0] === key && typeof tag[1] === "string")
@@ -304,11 +311,12 @@ export function validateSellerListingDraft(
     errors.location = "Location is required.";
   }
 
-  if (!draft.shippingType) {
+  const shippingManagedOnWeb = hasSellerListingShippingOptions(draft);
+  if (!shippingManagedOnWeb && !draft.shippingType) {
     errors.shippingType = "Select a shipping option.";
   }
 
-  if (requiresShippingCost(draft.shippingType)) {
+  if (!shippingManagedOnWeb && requiresShippingCost(draft.shippingType)) {
     if (shippingCostInput === null || shippingCostInput < 0) {
       errors.shippingCost = "Enter a valid shipping cost.";
     }
@@ -348,6 +356,7 @@ export function validateSellerListingDraft(
   }
 
   if (
+    !shippingManagedOnWeb &&
     isPickupShippingOption(draft.shippingType) &&
     normalized.pickupLocations.length === 0
   ) {
@@ -400,7 +409,8 @@ export function createSellerListingDraftFromEvent(
   return {
     eventId: event.id,
     dTag,
-    sourceCreatedAt: event.created_at,
+    // Postgres bigint columns arrive as strings in cached API responses.
+    sourceCreatedAt: Number(event.created_at),
     sourceTags: cloneTags(event.tags),
     title: getTagValues(event, "title")[0] ?? "",
     description:
@@ -434,9 +444,13 @@ export function buildSellerListingTags(params: {
 }): ProductFormValues {
   const normalized = normalizeSellerListingDraft(params.draft);
   const relayHint = params.relayHint ?? "";
+  const shippingManagedOnWeb = hasSellerListingShippingOptions(params.draft);
   const preservedTags = cloneTags(
     (params.draft.sourceTags ?? []).filter(
-      (tag) => !MOBILE_EDITABLE_TAGS.has(tag[0])
+      (tag) =>
+        !MOBILE_EDITABLE_TAGS.has(tag[0]) ||
+        (shippingManagedOnWeb &&
+          (tag[0] === "shipping" || tag[0] === "pickup_location"))
     )
   );
   const tags: ProductFormValues = [
@@ -453,12 +467,16 @@ export function buildSellerListingTags(params: {
     ["summary", normalized.description],
     ["price", String(normalized.price), normalized.currency],
     ["location", normalized.location],
-    [
-      "shipping",
-      normalized.shippingType,
-      String(normalized.shippingCost),
-      normalized.currency,
-    ],
+    ...(!shippingManagedOnWeb
+      ? [
+          [
+            "shipping",
+            normalized.shippingType,
+            String(normalized.shippingCost),
+            normalized.currency,
+          ] satisfies ProductFormValue,
+        ]
+      : []),
     ["status", normalized.status],
   ];
 
@@ -507,7 +525,10 @@ export function buildSellerListingTags(params: {
     tags.push(["quantity", String(normalized.quantity)]);
   }
 
-  if (isPickupShippingOption(normalized.shippingType)) {
+  if (
+    !shippingManagedOnWeb &&
+    isPickupShippingOption(normalized.shippingType)
+  ) {
     normalized.pickupLocations.forEach((location) => {
       tags.push(["pickup_location", location]);
     });
