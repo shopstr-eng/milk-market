@@ -4,11 +4,17 @@
 // "already registered", and never throws into checkout.
 
 const mockCreate = jest.fn();
+const mockPaymentMethodDomainCreate = jest.fn();
+
+jest.mock("@/utils/db/custom-domains", () => ({
+  getDomainByHost: jest.fn().mockResolvedValue(null),
+}));
 
 jest.mock("stripe", () => ({
   __esModule: true,
   default: jest.fn().mockImplementation(() => ({
     applePayDomains: { create: mockCreate },
+    paymentMethodDomains: { create: mockPaymentMethodDomainCreate },
   })),
 }));
 
@@ -20,6 +26,7 @@ import {
 beforeEach(() => {
   jest.clearAllMocks();
   mockCreate.mockResolvedValue({});
+  mockPaymentMethodDomainCreate.mockResolvedValue({});
   process.env.STRIPE_SECRET_KEY = "sk_test_x";
 });
 
